@@ -7844,6 +7844,9 @@
 { oid => '2305', descr => 'I/O',
   proname => 'internal_out', prorettype => 'cstring', proargtypes => 'internal',
   prosrc => 'internal_out' },
+{ oid => '6500', descr => 'default toaster handler',
+  proname => 'default_toaster_handler', prorettype => 'internal',
+  proargtypes => '', proisstrict => 'f', prosrc => 'default_toaster_handler' },
 { oid => '2312', descr => 'I/O',
   proname => 'anyelement_in', prorettype => 'anyelement',
   proargtypes => 'cstring', prosrc => 'anyelement_in' },
@@ -7893,6 +7896,13 @@
   proname => 'table_am_handler_in', proisstrict => 'f',
   prorettype => 'table_am_handler', proargtypes => 'cstring',
   prosrc => 'table_am_handler_in' },
+  { oid => '8889', descr => 'I/O',
+  proname => 'toaster_handler_out', prorettype => 'cstring',
+  proargtypes => 'toaster_handler', prosrc => 'toaster_handler_out' },
+{ oid => '8890', descr => 'I/O',
+  proname => 'toaster_handler_in', proisstrict => 'f',
+  prorettype => 'toaster_handler', proargtypes => 'cstring',
+  prosrc => 'toaster_handler_in' },
 { oid => '268', descr => 'I/O',
   proname => 'table_am_handler_out', prorettype => 'cstring',
   proargtypes => 'table_am_handler', prosrc => 'table_am_handler_out' },
@@ -12546,5 +12556,11 @@
   proargmodes => '{o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
   proargnames => '{pid,io_id,io_generation,state,operation,off,length,target,handle_data_len,raw_result,result,target_desc,f_sync,f_localmem,f_buffered}',
   prosrc => 'pg_get_aios' },
+
+]
+{ oid => '8893', descr => 'default toaster handler',
+  proname => 'default_toaster_handler', provolatile => 'v',
+  prorettype => 'toaster_handler', proargtypes => 'internal',
+  prosrc => 'default_toaster_handler' },
 
 ]

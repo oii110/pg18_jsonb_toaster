@@ -107,6 +107,13 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
 	 */
 	char		attstorage;
 
+
+	/*
+	 * atttoaster keeps toaster for VARLENA attributes with EXTERNAL/EXTENDED
+	 * storage. Value should be set for any toastable data type.
+	 */
+	Oid			atttoaster;
+
 	/*
 	 * attcompression sets the current compression method of the attribute.
 	 * Typically this is InvalidCompressionMethod ('\0') to specify use of the
@@ -154,6 +161,9 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
 	/* attribute's collation, if any */
 	Oid			attcollation BKI_LOOKUP_OPT(pg_collation);
 
+	/* attribute's toaster, if any */
+	Oid			atttoaster BKI_DEFAULT(0);
+
 #ifdef CATALOG_VARLEN			/* variable-length/nullable fields start here */
 	/* NOTE: The following fields are not present in tuple descriptors. */
 
@@ -192,7 +202,7 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
  * can access the variable-length fields except in a real tuple!
  */
 #define ATTRIBUTE_FIXED_PART_SIZE \
-	(offsetof(FormData_pg_attribute,attcollation) + sizeof(Oid))
+	(offsetof(FormData_pg_attribute,atttoaster) + sizeof(Oid))
 
 /* ----------------
  *		Form_pg_attribute corresponds to a pointer to a tuple with

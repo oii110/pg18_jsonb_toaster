@@ -61,6 +61,7 @@ my @all_input_files = qw(
   access/cmptype.h
   access/sdir.h
   access/tableam.h
+  access/toasterapi.h
   access/tsmapi.h
   commands/event_trigger.h
   commands/trigger.h
@@ -85,6 +86,7 @@ my @nodetag_only_files = qw(
   access/amapi.h
   access/sdir.h
   access/tableam.h
+  access/toasterapi.h
   access/tsmapi.h
   commands/event_trigger.h
   commands/trigger.h
@@ -108,7 +110,7 @@ my @nodetag_only_files = qw(
 # ABI stability during development.
 
 my $last_nodetag = 'WindowObjectData';
-my $last_nodetag_no = 479;
+my $last_nodetag_no = 480;
 
 # output file names
 my @output_files;
