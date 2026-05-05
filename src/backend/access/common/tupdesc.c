@@ -25,11 +25,14 @@
 #include "catalog/catalog.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_toaster.h"
 #include "common/hashfn.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
+//#include "utils/lsyscache.h"
+
 
 /* ResourceOwner callbacks to hold tupledesc references  */
 static void ResOwnerReleaseTupleDesc(Datum res);

@@ -81,6 +81,7 @@ CATALOG_HEADERS := \
 	pg_publication_namespace.h \
 	pg_publication_rel.h \
 	pg_subscription.h \
+	pg_toaster.h \
 	pg_subscription_rel.h
 
 GENERATED_HEADERS := $(CATALOG_HEADERS:%.h=%_d.h)
@@ -112,6 +113,7 @@ POSTGRES_BKI_DATA = \
 	pg_ts_dict.dat \
 	pg_ts_parser.dat \
 	pg_ts_template.dat \
+	pg_toaster.dat \
 	pg_type.dat
 
 GENBKI_OUTPUT_FILES = \

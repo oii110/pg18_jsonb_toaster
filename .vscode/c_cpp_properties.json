@@ -1,0 +1,43 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "Linux",
+      "intelliSenseMode": "linux-gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "includePath": [
+        "${workspaceFolder}/src/include",
+        "${workspaceFolder}/src/include/catalog",
+        "${workspaceFolder}/src/include/access",
+        "${workspaceFolder}/src/include/utils",
+        "${workspaceFolder}/src/backend",
+        "${workspaceFolder}/src/backend/access",
+        "${workspaceFolder}/src/backend/access/index",
+        "${workspaceFolder}/src/backend/utils/adt",
+        "${workspaceFolder}/src/common",
+        "${workspaceFolder}/src/interfaces",
+        "${workspaceFolder}/src/port"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}/src/include",
+          "${workspaceFolder}/src/backend",
+          "${workspaceFolder}/src/common",
+          "${workspaceFolder}/src/interfaces",
+          "${workspaceFolder}/src/port"
+        ],
+        "limitSymbolsToIncludedHeaders": true
+      },
+      "defines": [
+        "FRONTEND=0",
+        "BACKEND=1",
+        "EXEC_BACKEND=1",
+        "USE_INTERNAL_FTS=1",
+        "USE_REPLXX=1"
+      ],
+      "compileCommands": "${workspaceFolder}/compile_commands.json"
+    }
+  ]
+}

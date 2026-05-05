@@ -206,6 +206,9 @@ my $FirstUnpinnedObjectId =
 	'FirstUnpinnedObjectId');
 # Hash of next available OID, indexed by catalog name.
 my %GenbkiNextOids;
+my $DEFAULT_TOASTER_OID =
+  Catalog::FindDefinedSymbolFromData($catalog_data{pg_toaster},
+									'DEFAULT_TOASTER_OID');
 
 
 # Fetch some special data that we will substitute into the output file.

@@ -26,7 +26,6 @@
 typedef enum NodeTag
 {
 	T_Invalid = 0,
-
 #include "nodes/nodetags.h"
 } NodeTag;
 

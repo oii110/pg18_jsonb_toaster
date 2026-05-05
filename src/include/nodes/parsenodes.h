@@ -764,6 +764,8 @@ typedef struct ColumnDef
 	RangeVar   *identitySequence;	/* to store identity sequence name for
 									 * ALTER TABLE ... ADD COLUMN */
 	char		generated;		/* attgenerated setting */
+	char	   *toaster;		/* toaster name or NULL for default */
+
 	CollateClause *collClause;	/* untransformed COLLATE spec, if any */
 	Oid			collOid;		/* collation OID (InvalidOid if not set) */
 	List	   *constraints;	/* other constraints on column */
@@ -2058,6 +2060,37 @@ typedef struct JsonArrayAgg
 	bool		absent_on_null; /* skip NULL elements? */
 } JsonArrayAgg;
 
+// /*
+//  * JsonTransform -
+//  *		untransformed representation of JSON_MODIFY()
+//  */
+//  typedef struct JsonTransform
+//  {
+// 	 NodeTag		type;
+// 	 JsonValueExpr *expr;		/* context item expression */
+// 	 List	   *ops;			/* list of operations */
+// 	 JsonOutput *output;			/* output clause, if specified */
+// 	 List	   *passing;		/* list of PASSING clause arguments, if any */
+// 	 int			location;		/* token location, or -1 if unknown */
+//  } JsonTransform;
+ 
+//  /*
+//   * JsonTransformOp -
+//   *		untransformed representation of JSON_MODIFY() operations
+//   */
+//  typedef struct JsonTransformOp
+//  {
+// 	 NodeTag		type;
+// 	 Node	   *pathspec;
+// 	 Node	   *expr;
+// 	 JsonTransformOpType op_type;
+// 	 JsonTransformBehavior on_existing;
+// 	 JsonTransformBehavior on_missing;
+// 	 JsonTransformBehavior on_null;
+// 	 int			location;		/* token location, or -1 if unknown */
+//  } JsonTransformOp;
+ 
+ 
 
 /*****************************************************************************
  *		Raw Grammar Output Statements
@@ -2362,6 +2395,7 @@ typedef enum ObjectType
 	OBJECT_TABCONSTRAINT,
 	OBJECT_TABLE,
 	OBJECT_TABLESPACE,
+	OBJECT_TOASTER,
 	OBJECT_TRANSFORM,
 	OBJECT_TRIGGER,
 	OBJECT_TSCONFIGURATION,
@@ -2477,6 +2511,7 @@ typedef enum AlterTableType
 	AT_SetIdentity,				/* SET identity column options */
 	AT_DropIdentity,			/* DROP IDENTITY */
 	AT_ReAddStatistics,			/* internal to commands/tablecmds.c */
+	AT_SetToaster,				/* alter column set toaster */
 } AlterTableType;
 
 typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
@@ -3093,6 +3128,20 @@ typedef struct CreateAmStmt
 	char		amtype;			/* type of access method */
 } CreateAmStmt;
 
+
+/*----------------------
+ *		Create TOASTER Statement
+ *----------------------
+ */
+ typedef struct CreateToasterStmt
+ {
+	 NodeTag		type;
+	 char	   *tsrname;			/* toaster name */
+	 List	   *handler_name;	/* handler function name */
+	 bool		if_not_exists;
+ } CreateToasterStmt;
+
+ 
 /* ----------------------
  *		Create TRIGGER Statement
  * ----------------------

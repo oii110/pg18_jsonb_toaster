@@ -77,6 +77,7 @@
 #include "utils/syscache.h"
 
 
+
 /* Potentially set by pg_upgrade_support functions */
 Oid			binary_upgrade_next_heap_pg_class_oid = InvalidOid;
 Oid			binary_upgrade_next_toast_pg_class_oid = InvalidOid;
@@ -770,6 +771,8 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 		slot[slotCount]->tts_values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(attrs->attislocal);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attinhcount - 1] = Int16GetDatum(attrs->attinhcount);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcollation - 1] = ObjectIdGetDatum(attrs->attcollation);
+		slot[slotCount]->tts_values[Anum_pg_attribute_atttoaster - 1] = ObjectIdGetDatum(attrs->atttoaster);
+
 		if (attrs_extra)
 		{
 			slot[slotCount]->tts_values[Anum_pg_attribute_attstattarget - 1] = attrs_extra->attstattarget.value;

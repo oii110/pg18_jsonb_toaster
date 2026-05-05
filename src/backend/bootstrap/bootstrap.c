@@ -41,6 +41,8 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/relmapper.h"
+#include "catalog/pg_toaster.h"
+
 
 
 static void CheckerModeMain(void);
@@ -79,62 +81,63 @@ struct typinfo
 	bool		byval;
 	char		align;
 	char		storage;
+	Oid			toaster;
 	Oid			collation;
 	Oid			inproc;
 	Oid			outproc;
 };
 
 static const struct typinfo TypInfo[] = {
-	{"bool", BOOLOID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid,
-	F_BOOLIN, F_BOOLOUT},
-	{"bytea", BYTEAOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
-	F_BYTEAIN, F_BYTEAOUT},
-	{"char", CHAROID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid,
-	F_CHARIN, F_CHAROUT},
-	{"int2", INT2OID, 0, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_INT2IN, F_INT2OUT},
-	{"int4", INT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_INT4IN, F_INT4OUT},
-	{"float4", FLOAT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_FLOAT4IN, F_FLOAT4OUT},
-	{"name", NAMEOID, CHAROID, NAMEDATALEN, false, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, C_COLLATION_OID,
-	F_NAMEIN, F_NAMEOUT},
-	{"regclass", REGCLASSOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_REGCLASSIN, F_REGCLASSOUT},
-	{"regproc", REGPROCOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_REGPROCIN, F_REGPROCOUT},
-	{"regtype", REGTYPEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_REGTYPEIN, F_REGTYPEOUT},
-	{"regrole", REGROLEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_REGROLEIN, F_REGROLEOUT},
-	{"regnamespace", REGNAMESPACEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_REGNAMESPACEIN, F_REGNAMESPACEOUT},
-	{"text", TEXTOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
-	F_TEXTIN, F_TEXTOUT},
-	{"oid", OIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_OIDIN, F_OIDOUT},
-	{"tid", TIDOID, 0, 6, false, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_TIDIN, F_TIDOUT},
-	{"xid", XIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_XIDIN, F_XIDOUT},
-	{"cid", CIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_CIDIN, F_CIDOUT},
-	{"pg_node_tree", PG_NODE_TREEOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
-	F_PG_NODE_TREE_IN, F_PG_NODE_TREE_OUT},
-	{"int2vector", INT2VECTOROID, INT2OID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_INT2VECTORIN, F_INT2VECTOROUT},
-	{"oidvector", OIDVECTOROID, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
-	F_OIDVECTORIN, F_OIDVECTOROUT},
-	{"_int4", INT4ARRAYOID, INT4OID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
-	F_ARRAY_IN, F_ARRAY_OUT},
-	{"_text", 1009, TEXTOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
-	F_ARRAY_IN, F_ARRAY_OUT},
-	{"_oid", 1028, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
-	F_ARRAY_IN, F_ARRAY_OUT},
-	{"_char", 1002, CHAROID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
-	F_ARRAY_IN, F_ARRAY_OUT},
-	{"_aclitem", 1034, ACLITEMOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
-	F_ARRAY_IN, F_ARRAY_OUT}
+    {"bool", BOOLOID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_BOOLIN, F_BOOLOUT},
+    {"bytea", BYTEAOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, InvalidOid, F_BYTEAIN, F_BYTEAOUT},
+    {"char", CHAROID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_CHARIN, F_CHAROUT},
+    {"int2", INT2OID, 0, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_INT2IN, F_INT2OUT},
+    {"int4", INT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_INT4IN, F_INT4OUT},
+    {"float4", FLOAT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_FLOAT4IN, F_FLOAT4OUT},
+    {"name", NAMEOID, CHAROID, NAMEDATALEN, false, TYPALIGN_CHAR, TYPSTORAGE_PLAIN,
+     InvalidOid, C_COLLATION_OID, F_NAMEIN, F_NAMEOUT},
+    {"regclass", REGCLASSOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_REGCLASSIN, F_REGCLASSOUT},
+    {"regproc", REGPROCOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_REGPROCIN, F_REGPROCOUT},
+    {"regtype", REGTYPEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_REGTYPEIN, F_REGTYPEOUT},
+    {"regrole", REGROLEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_REGROLEIN, F_REGROLEOUT},
+    {"regnamespace", REGNAMESPACEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_REGNAMESPACEIN, F_REGNAMESPACEOUT},
+    {"text", TEXTOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, DEFAULT_COLLATION_OID, F_TEXTIN, F_TEXTOUT},
+    {"oid", OIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_OIDIN, F_OIDOUT},
+    {"tid", TIDOID, 0, 6, false, TYPALIGN_SHORT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_TIDIN, F_TIDOUT},
+    {"xid", XIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_XIDIN, F_XIDOUT},
+    {"cid", CIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_CIDIN, F_CIDOUT},
+    {"pg_node_tree", PG_NODE_TREEOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, DEFAULT_COLLATION_OID, F_PG_NODE_TREE_IN, F_PG_NODE_TREE_OUT},
+    {"int2vector", INT2VECTOROID, INT2OID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_INT2VECTORIN, F_INT2VECTOROUT},
+    {"oidvector", OIDVECTOROID, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+     InvalidOid, InvalidOid, F_OIDVECTORIN, F_OIDVECTOROUT},
+    {"_int4", INT4ARRAYOID, INT4OID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, InvalidOid, F_ARRAY_IN, F_ARRAY_OUT},
+    {"_text", 1009, TEXTOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, DEFAULT_COLLATION_OID, F_ARRAY_IN, F_ARRAY_OUT},
+    {"_oid", 1028, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, InvalidOid, F_ARRAY_IN, F_ARRAY_OUT},
+    {"_char", 1002, CHAROID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, InvalidOid, F_ARRAY_IN, F_ARRAY_OUT},
+    {"_aclitem", 1034, ACLITEMOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+     DEFAULT_TOASTER_OID, InvalidOid, F_ARRAY_IN, F_ARRAY_OUT}
 };
 
 static const int n_types = sizeof(TypInfo) / sizeof(struct typinfo);
@@ -546,6 +549,9 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
 		attrtypes[attnum]->attbyval = Ap->am_typ.typbyval;
 		attrtypes[attnum]->attalign = Ap->am_typ.typalign;
 		attrtypes[attnum]->attstorage = Ap->am_typ.typstorage;
+		attrtypes[attnum]->atttoaster =
+			(Ap->am_typ.typstorage == TYPSTORAGE_PLAIN) ?
+				InvalidOid : DEFAULT_TOASTER_OID;
 		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
 		attrtypes[attnum]->attcollation = Ap->am_typ.typcollation;
 		/* if an array type, assume 1-dimensional attribute */
@@ -563,6 +569,7 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
 		attrtypes[attnum]->attstorage = TypInfo[typeoid].storage;
 		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
 		attrtypes[attnum]->attcollation = TypInfo[typeoid].collation;
+		attrtypes[attnum]->atttoaster = TypInfo[typeoid].toaster;
 		/* if an array type, assume 1-dimensional attribute */
 		if (TypInfo[typeoid].elem != InvalidOid &&
 			attrtypes[attnum]->attlen < 0)

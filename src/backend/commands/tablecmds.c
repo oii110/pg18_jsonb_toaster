@@ -108,6 +108,9 @@
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/usercontext.h"
+#include "access/toasterapi.h"
+#include "catalog/pg_toaster.h"
+
 
 /*
  * ON COMMIT action list
@@ -372,7 +375,7 @@ static void RangeVarCallbackForTruncate(const RangeVar *relation,
 										Oid relId, Oid oldRelId, void *arg);
 static List *MergeAttributes(List *columns, const List *supers, char relpersistence,
 							 bool is_partition, List **supconstr,
-							 List **supnotnulls);
+							 List **supnotnulls, Oid accessMethodId);
 static List *MergeCheckConstraint(List *constraints, const char *name, Node *expr, bool is_enforced);
 static void MergeChildAttribute(List *inh_columns, int exist_attno, int newcol_attno, const ColumnDef *newdef);
 static ColumnDef *MergeInheritedAttribute(List *inh_columns, int exist_attno, const ColumnDef *newdef);
@@ -410,6 +413,10 @@ static bool ATExecAlterConstrDeferrability(List **wqueue, ATAlterConstraint *cmd
 static bool ATExecAlterConstrInheritability(List **wqueue, ATAlterConstraint *cmdcon,
 											Relation conrel, Relation rel,
 											HeapTuple contuple, LOCKMODE lockmode);
+
+static ObjectAddress ATExecSetToaster(Relation rel, const char *colName,
+									  Node *newValue, LOCKMODE lockmode);
+
 static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
@@ -529,6 +536,10 @@ static ObjectAddress ATExecSetOptions(Relation rel, const char *colName,
 									  Node *options, bool isReset, LOCKMODE lockmode);
 static ObjectAddress ATExecSetStorage(Relation rel, const char *colName,
 									  Node *newValue, LOCKMODE lockmode);
+
+static ObjectAddress ATExecSetToaster(Relation rel, const char *colName,
+									  Node *newValue, LOCKMODE lockmode);
+									  
 static void ATPrepDropColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 							 AlterTableCmd *cmd, LOCKMODE lockmode,
 							 AlterTableUtilityContext *context);
@@ -781,6 +792,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	ListCell   *listptr;
 	AttrNumber	attnum;
 	bool		partitioned;
+	char	   *accessMethod = NULL;
 	const char *const validnsps[] = HEAP_RELOPT_NAMESPACES;
 	Oid			ofTypeId;
 	ObjectAddress address;
@@ -959,6 +971,29 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		ofTypeId = InvalidOid;
 
 	/*
+	 * If the statement hasn't specified an access method, but we're defining
+	 * a type of relation that needs one, use the default.
+	 */
+	if (stmt->accessMethod != NULL)
+	{
+		accessMethod = stmt->accessMethod;
+
+		if (partitioned)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("specifying a table access method is not supported on a partitioned table")));
+
+	}
+	else if (RELKIND_HAS_TABLE_AM(relkind))
+		accessMethod = default_table_access_method;
+
+	/* look up the access method, verify it is for a table */
+	if (accessMethod != NULL)
+		accessMethodId = get_table_am_oid(accessMethod, false);
+
+	
+
+	/*
 	 * Look up inheritance ancestors and generate relation schema, including
 	 * inherited attributes.  (Note that stmt->tableElts is destructively
 	 * modified by MergeAttributes.)
@@ -967,7 +1002,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		MergeAttributes(stmt->tableElts, inheritOids,
 						stmt->relation->relpersistence,
 						stmt->partbound != NULL,
-						&old_constraints, &old_notnulls);
+						&old_constraints, &old_notnulls, accessMethodId);
 
 	/*
 	 * Create a tuple descriptor from the relation schema.  Note that this
@@ -992,8 +1027,10 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	foreach(listptr, stmt->tableElts)
 	{
 		ColumnDef  *colDef = lfirst(listptr);
+		Form_pg_attribute attr;
 
 		attnum++;
+		attr = TupleDescAttr(descriptor, attnum - 1);
 		if (colDef->raw_default != NULL)
 		{
 			RawColumnDefault *rawEnt;
@@ -1006,6 +1043,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 			rawEnt->generated = colDef->generated;
 			rawDefaults = lappend(rawDefaults, rawEnt);
 		}
+		
 		else if (colDef->cooked_default != NULL)
 		{
 			CookedConstraint *cooked;
@@ -1023,6 +1061,19 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 			cooked->is_no_inherit = false;
 			cookedDefaults = lappend(cookedDefaults, cooked);
 		}
+
+		if (colDef->toaster)
+			attr->atttoaster = get_toaster_oid(colDef->toaster, false);
+		else if (TypeIsToastable(attr->atttypid))
+			attr->atttoaster = DEFAULT_TOASTER_OID;
+		else
+			attr->atttoaster = InvalidOid;
+
+		if (OidIsValid(attr->atttoaster))
+			validateToaster(attr->atttoaster, attr->atttypid,
+							attr->attstorage, attr->attcompression,
+							accessMethodId, false);
+
 	}
 
 	/*
@@ -2544,7 +2595,8 @@ storage_name(char c)
  */
 static List *
 MergeAttributes(List *columns, const List *supers, char relpersistence,
-				bool is_partition, List **supconstr, List **supnotnulls)
+				bool is_partition, List **supconstr, List **supnotnulls,
+				Oid accessMethodId)
 {
 	List	   *inh_columns = NIL;
 	List	   *constraints = NIL;
@@ -2554,6 +2606,8 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
 	static Node bogus_marker = {0}; /* marks conflicting defaults */
 	List	   *saved_columns = NIL;
 	ListCell   *lc;
+
+	(void) accessMethodId;
 
 	/*
 	 * Check for and reject tables with too many columns. We perform this
@@ -3379,6 +3433,17 @@ MergeChildAttribute(List *inh_columns, int exist_attno, int newcol_attno, const 
 						   inhdef->generated == ATTRIBUTE_GENERATED_STORED ? "STORED" : "VIRTUAL",
 						   newdef->generated == ATTRIBUTE_GENERATED_STORED ? "STORED" : "VIRTUAL")));
 
+/* Copy toaster parameter */
+	if (inhdef->toaster == NULL)
+    inhdef->toaster = newdef->toaster;
+	else if (newdef->toaster != NULL &&
+         strcmp(inhdef->toaster, newdef->toaster) != 0)
+    ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("column \"%s\" has a toaster parameter conflict",
+                    attributeName)));
+
+
 	/*
 	 * If new def has a default, override previous default
 	 */
@@ -3488,6 +3553,16 @@ MergeInheritedAttribute(List *inh_columns,
 					 errdetail("%s versus %s",
 							   prevdef->compression, newdef->compression)));
 	}
+	/* Copy/check toaster parameter */
+	if (prevdef->toaster &&
+		get_toaster_oid(prevdef->toaster, false) != get_toaster_oid(newdef->toaster, false))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("inherited column \"%s\" has a toaster conflict",
+						attributeName)));
+	
+	if (newdef->toaster)
+		prevdef->toaster = pstrdup(newdef->toaster);
 
 	/*
 	 * Check for GENERATED conflicts
@@ -5279,6 +5354,10 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			/* No command-specific prep needed */
 			pass = AT_PASS_MISC;
 			break;
+		case AT_SetToaster:
+			ATSimplePermissions(cmd->subtype, rel, ATT_TABLE);
+			pass = AT_PASS_MISC;
+			break;
 		default:				/* oops */
 			elog(ERROR, "unrecognized alter table type: %d",
 				 (int) cmd->subtype);
@@ -5674,6 +5753,10 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_DetachPartitionFinalize:
 			address = ATExecDetachPartitionFinalize(rel, ((PartitionCmd *) cmd->def)->name);
+			break;
+		case AT_SetToaster:
+			Assert(IsA(cmd->def, String));
+			address = ATExecSetToaster(rel, cmd->name, cmd->def, lockmode);
 			break;
 		default:				/* oops */
 			elog(ERROR, "unrecognized alter table type: %d",
@@ -6721,6 +6804,8 @@ alter_table_type_to_string(AlterTableType cmdtype)
 			return "ALTER COLUMN ... SET";
 		case AT_DropIdentity:
 			return "ALTER COLUMN ... DROP IDENTITY";
+		case AT_SetToaster:
+   			return "ALTER COLUMN ... SET TOASTER";
 		case AT_ReAddStatistics:
 			return NULL;		/* not real grammar */
 	}
@@ -7226,7 +7311,7 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				attrdesc;
 	HeapTuple	reltup;
 	Form_pg_class relform;
-	Form_pg_attribute attribute;
+	Form_pg_attribute attribute = NULL;
 	int			newattnum;
 	char		relkind;
 	Expr	   *defval;
@@ -7362,6 +7447,18 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		elog(ERROR, "cache lookup failed for relation %u", myrelid);
 	relform = (Form_pg_class) GETSTRUCT(reltup);
 	relkind = relform->relkind;
+
+	if (colDef->toaster)
+    	attribute->atttoaster = get_toaster_oid(colDef->toaster, false);
+	else if (TypeIsToastable(attribute->atttypid))
+   		attribute->atttoaster = DEFAULT_TOASTER_OID;
+	else
+    	attribute->atttoaster = InvalidOid;
+
+	if (OidIsValid(attribute->atttoaster))
+    	validateToaster(attribute->atttoaster, attribute->atttypid,
+                    attribute->attstorage, attribute->attcompression,
+                    rel->rd_rel->relam, false);
 
 	/* Determine the new attribute's number */
 	newattnum = relform->relnatts + 1;
@@ -9131,6 +9228,7 @@ SetIndexStorageProperties(Relation rel, Relation attrelation,
 						  AttrNumber attnum,
 						  bool setstorage, char newstorage,
 						  bool setcompression, char newcompression,
+						  bool settoaster, Oid toasterOid,
 						  LOCKMODE lockmode)
 {
 	ListCell   *lc;
@@ -9170,6 +9268,8 @@ SetIndexStorageProperties(Relation rel, Relation attrelation,
 
 			if (setcompression)
 				attrtuple->attcompression = newcompression;
+
+			if (settoaster) attrtuple->atttoaster = toasterOid;
 
 			CatalogTupleUpdate(attrelation, &tuple->t_self, tuple);
 
@@ -9231,6 +9331,7 @@ ATExecSetStorage(Relation rel, const char *colName, Node *newValue, LOCKMODE loc
 	SetIndexStorageProperties(rel, attrelation, attnum,
 							  true, attrtuple->attstorage,
 							  false, 0,
+							  false, InvalidOid,
 							  lockmode);
 
 	heap_freetuple(tuple);
@@ -9242,6 +9343,49 @@ ATExecSetStorage(Relation rel, const char *colName, Node *newValue, LOCKMODE loc
 	return address;
 }
 
+
+static ObjectAddress
+ATExecSetToaster(Relation rel, const char *colName, Node *newValue, LOCKMODE lockmode)
+{
+    Oid         newToaster;
+    Relation    attrelation;
+    HeapTuple   tuple;
+    Form_pg_attribute attrtuple;
+    AttrNumber  attnum;
+    ObjectAddress address;
+
+    newToaster = get_toaster_oid(strVal(newValue), false);
+    attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+    tuple = SearchSysCacheCopyAttName(RelationGetRelid(rel), colName);
+
+    if (!HeapTupleIsValid(tuple))
+        ereport(ERROR, (errcode(ERRCODE_UNDEFINED_COLUMN),
+                 errmsg("column \"%s\" does not exist", colName)));
+
+    attrtuple = (Form_pg_attribute) GETSTRUCT(tuple);
+    attnum = attrtuple->attnum;
+
+    if (attnum <= 0)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("cannot alter system column \"%s\"", colName)));
+
+    attrtuple->atttoaster = newToaster;
+    if (OidIsValid(newToaster))
+        validateToaster(attrtuple->atttoaster, attrtuple->atttypid,
+                        attrtuple->attstorage, attrtuple->attcompression,
+                        rel->rd_rel->relam, false);
+
+    CatalogTupleUpdate(attrelation, &tuple->t_self, tuple);
+    
+    /* Обновляем индексы */
+    SetIndexStorageProperties(rel, attrelation, attnum,
+                              false, 0, false, 0,
+                              true, newToaster, lockmode);
+
+    table_close(attrelation, RowExclusiveLock);
+    ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    return address;
+}
 
 /*
  * ALTER TABLE DROP COLUMN
@@ -14967,6 +15111,16 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 	attTup->attstorage = tform->typstorage;
 	attTup->attcompression = InvalidCompressionMethod;
 
+	if (tform->typstorage == TYPSTORAGE_PLAIN)
+    attTup->atttoaster = InvalidOid;
+	else
+	{
+   		 attTup->atttoaster = DEFAULT_TOASTER_OID;
+   		 validateToaster(attTup->atttoaster, attTup->atttypid,
+                    attTup->attstorage, attTup->attcompression,
+                    rel->rd_rel->relam, false);
+	}
+
 	ReleaseSysCache(typeTuple);
 
 	CatalogTupleUpdate(attrelation, &heapTup->t_self, heapTup);
@@ -18795,6 +18949,7 @@ ATExecSetCompression(Relation rel,
 	SetIndexStorageProperties(rel, attrel, attnum,
 							  false, 0,
 							  true, cmethod,
+							  false, InvalidOid,
 							  lockmode);
 
 	heap_freetuple(tuple);
