@@ -192,6 +192,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 		}
 
 		coldef->is_not_null = true;
+		coldef->toaster = NULL; 
 		null[i - 1] = false;
 
 		stmt->tableElts = lappend(stmt->tableElts, coldef);

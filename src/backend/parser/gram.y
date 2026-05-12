@@ -19498,7 +19498,7 @@ SplitColQualList(List *qualList,
 		}
 		else if (IsA(n, String))
 		{
-			String	*toaster_val = (String*) n;
+			String	*toaster_val = (String *) n;
 
 			if (toaster_name == NULL)
 				ereport(ERROR,
@@ -19509,7 +19509,7 @@ SplitColQualList(List *qualList,
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("multiple TOASTER clauses not allowed")));
-			
+
 			*toaster_name = strVal(toaster_val);
 		}
 		else
