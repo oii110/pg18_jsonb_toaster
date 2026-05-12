@@ -9,6 +9,1944 @@ index 4e91139..92fa945 100644
 +/src/test/regress/regression.diffs
 +/src/test/regress/regression.out
 +/full_series.patch
+diff --git a/complete_diff.patch b/complete_diff.patch
+new file mode 100644
+index 0000000..b4ee1b5
+--- /dev/null
++++ b/complete_diff.patch
+@@ -0,0 +1,1597 @@
++diff --git a/.gitignore b/.gitignore
++index 4e91139..92fa945 100644
++--- a/.gitignore
+++++ b/.gitignore
++@@ -43,3 +43,6 @@ lib*.pc
++ /Release/
++ /tmp_install/
++ /portlock/
+++/src/test/regress/regression.diffs
+++/src/test/regress/regression.out
+++/full_series.patch
++diff --git a/src/backend/access/index/Makefile b/src/backend/access/index/Makefile
++index 6f2e306..12301a4 100644
++--- a/src/backend/access/index/Makefile
+++++ b/src/backend/access/index/Makefile
++@@ -16,6 +16,7 @@ OBJS = \
++ 	amapi.o \
++ 	amvalidate.o \
++ 	genam.o \
++-	indexam.o
+++	indexam.o\
+++	toasterapi.o
++ 
++ include $(top_srcdir)/src/backend/common.mk
++diff --git a/src/backend/access/index/meson.build b/src/backend/access/index/meson.build
++index e29c030..9c41dff 100644
++--- a/src/backend/access/index/meson.build
+++++ b/src/backend/access/index/meson.build
++@@ -5,4 +5,5 @@ backend_sources += files(
++   'amvalidate.c',
++   'genam.c',
++   'indexam.c',
+++  'toasterapi.c'
++ )
++diff --git a/src/backend/access/index/toasterapi.c b/src/backend/access/index/toasterapi.c
++new file mode 100644
++index 0000000..684c4ab
++--- /dev/null
+++++ b/src/backend/access/index/toasterapi.c
++@@ -0,0 +1,197 @@
+++/*-------------------------------------------------------------------------
+++ *
+++ * toasterapi.c
+++ *	  Support routines for API for Postgres PG_TOASTER methods.
+++ *
+++ * Copyright (c) 2015-2021, PostgreSQL Global Development Group
+++ *
+++ *
+++ * IDENTIFICATION
+++ *	  src/backend/access/index/toasterapi.c
+++ *
+++ *-------------------------------------------------------------------------
+++ */
+++#include "postgres.h"
+++
+++#include "access/toasterapi.h"
+++#include "access/htup_details.h"
+++#include "catalog/pg_toaster.h"
+++#include "commands/defrem.h"
+++#include "lib/pairingheap.h"
+++#include "utils/builtins.h"
+++#include "utils/memutils.h"
+++#include "utils/lsyscache.h"
+++#include "utils/syscache.h"
+++
+++
+++/*
+++ * Toasters is very often called so syscache lookup and TsrRoutine allocation are
+++ * expensive and we need to cache them.
+++ *
+++ * We believe what there are only a few toasters and there is high chance that
+++ * only one or only two of them are heavy used, so most used toasters should be
+++ * found as easy as possible. So, let us use a simple list, in future it could
+++ * be changed to other structure. For now it will be stored in TopCacheContext
+++ * and never destroed in backend life cycle - toasters are never deleted.
+++ */
+++
+++typedef struct ToasterCacheEntry
+++{
+++	Oid			toasterOid;
+++	TsrRoutine *routine;
+++} ToasterCacheEntry;
+++
+++static List	*ToasterCache = NIL;
+++
+++/*
+++ * SearchTsrCache - get cached toaster routine, emits an error if toaster
+++ * doesn't exist
+++ */
+++TsrRoutine*
+++SearchTsrCache(Oid	toasterOid)
+++{
+++	ListCell		   *lc;
+++	ToasterCacheEntry  *entry;
+++	MemoryContext		ctx;
+++
+++	if (list_length(ToasterCache) > 0)
+++	{
+++		/* fast path */
+++		entry = (ToasterCacheEntry*)linitial(ToasterCache);
+++		if (entry->toasterOid == toasterOid)
+++			return entry->routine;
+++	}
+++
+++	/* didn't find in first position */
+++	ctx = MemoryContextSwitchTo(CacheMemoryContext);
+++
+++	for_each_from(lc, ToasterCache, 0)
+++	{
+++		entry = (ToasterCacheEntry*)lfirst(lc);
+++
+++		if (entry->toasterOid == toasterOid)
+++		{
+++			/* remove entry from list, it will be added in a head of list below */
+++			foreach_delete_current(ToasterCache, lc);
+++			goto out;
+++		}
+++	}
+++
+++	/* did not find entry, make a new one */
+++	entry = palloc(sizeof(*entry));
+++
+++	entry->toasterOid = toasterOid;
+++	entry->routine = GetTsrRoutineByOid(toasterOid, false);
+++
+++out:
+++	ToasterCache = lcons(entry, ToasterCache);
+++	MemoryContextSwitchTo(ctx);
+++
+++	return entry->routine;
+++}
+++
+++/*
+++ * GetRoutine - call the specified toaster handler routine to get
+++ * its TsrRoutine struct, which will be palloc'd in the caller's context.
+++ *
+++ */
+++TsrRoutine *
+++GetTsrRoutine(Oid tsrhandler)
+++{
+++	Datum		datum;
+++	TsrRoutine *routine;
+++
+++	datum = OidFunctionCall0(tsrhandler);
+++	routine = (TsrRoutine *) DatumGetPointer(datum);
+++
+++	if (routine == NULL || !IsA(routine, TsrRoutine))
+++		elog(ERROR, "toaster handler function %u did not return an TsrRoutine struct",
+++			 tsrhandler);
+++
+++	return routine;
+++}
+++
+++/*
+++ * GetTsrRoutineByOid - look up the handler of the toaster
+++ * with the given OID, and get its TsrRoutine struct.
+++ *
+++ * If the given OID isn't a valid toaster, returns NULL if
+++ * noerror is true, else throws error.
+++ */
+++TsrRoutine *
+++GetTsrRoutineByOid(Oid tsroid, bool noerror)
+++{
+++	HeapTuple	tuple;
+++	Form_pg_toaster	tsrform;
+++	regproc		tsrhandler;
+++
+++	/* Get handler function OID for the access method */
+++	tuple = SearchSysCache1(TOASTEROID, ObjectIdGetDatum(tsroid));
+++	if (!HeapTupleIsValid(tuple))
+++	{
+++		if (noerror)
+++			return NULL;
+++		elog(ERROR, "cache lookup failed for toaster %u",
+++			 tsroid);
+++	}
+++	tsrform = (Form_pg_toaster) GETSTRUCT(tuple);
+++
+++	tsrhandler = tsrform->tsrhandler;
+++
+++	/* Complain if handler OID is invalid */
+++	if (!RegProcedureIsValid(tsrhandler))
+++	{
+++		if (noerror)
+++		{
+++			ReleaseSysCache(tuple);
+++			return NULL;
+++		}
+++		ereport(ERROR,
+++				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+++				 errmsg("toaster \"%s\" does not have a handler",
+++						NameStr(tsrform->tsrname))));
+++	}
+++
+++	ReleaseSysCache(tuple);
+++
+++	/* And finally, call the handler function to get the API struct. */
+++	return GetTsrRoutine(tsrhandler);
+++}
+++
+++/*
+++ * could toaster operates with given type and access method?
+++ * If it can't then validate method should emit an error if false_ok = false
+++ */
+++bool
+++validateToaster(Oid toasteroid, Oid typeoid,
+++				char storage, char compression, Oid amoid, bool false_ok)
+++{
+++	TsrRoutine *tsrroutine;
+++	bool	result = true;
+++
+++	if (!TypeIsToastable(typeoid))
+++		ereport(ERROR,
+++				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+++				 errmsg("data type %s can not be toasted",
+++						format_type_be(typeoid))));
+++
+++	tsrroutine = GetTsrRoutineByOid(toasteroid, false_ok);
+++
+++	/* if false_ok == false then GetTsrRoutineByOid emits an error */
+++	if (tsrroutine == NULL)
+++		return false;
+++
+++#if 0 /* XXX teodor: commented out while there is no actual toaster */
+++	/* should not happen */
+++	if (tsrroutine->toastervalidate == NULL)
+++		elog(ERROR, "function toastervalidate is not defined for toaster %s",
+++			 get_toaster_name(toasteroid));
+++
+++	result = tsrroutine->toastervalidate(typeoid, storage, compression,
+++										 amoid, false_ok);
+++#endif
+++
+++	pfree(tsrroutine);
+++
+++	return result;
+++}
++diff --git a/src/backend/bootstrap/bootstrap.c b/src/backend/bootstrap/bootstrap.c
++index 6db8648..9a85294 100644
++--- a/src/backend/bootstrap/bootstrap.c
+++++ b/src/backend/bootstrap/bootstrap.c
++@@ -41,6 +41,8 @@
++ #include "utils/memutils.h"
++ #include "utils/rel.h"
++ #include "utils/relmapper.h"
+++#include "catalog/pg_toaster.h"
+++
++ 
++ 
++ static void CheckerModeMain(void);
++@@ -79,61 +81,67 @@ struct typinfo
++ 	bool		byval;
++ 	char		align;
++ 	char		storage;
+++	Oid			toaster;
++ 	Oid			collation;
++ 	Oid			inproc;
++ 	Oid			outproc;
++ };
++ 
+++
++ static const struct typinfo TypInfo[] = {
++-	{"bool", BOOLOID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"bool", BOOLOID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_BOOLIN, F_BOOLOUT},
++-	{"bytea", BYTEAOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
+++	{"bytea", BYTEAOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  InvalidOid,
++ 	F_BYTEAIN, F_BYTEAOUT},
++-	{"char", CHAROID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"char", CHAROID, 0, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_CHARIN, F_CHAROUT},
++-	{"int2", INT2OID, 0, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"int2", INT2OID, 0, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_INT2IN, F_INT2OUT},
++-	{"int4", INT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"int4", INT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_INT4IN, F_INT4OUT},
++-	{"float4", FLOAT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"float4", FLOAT4OID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_FLOAT4IN, F_FLOAT4OUT},
++-	{"name", NAMEOID, CHAROID, NAMEDATALEN, false, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, C_COLLATION_OID,
+++	{"name", NAMEOID, CHAROID, NAMEDATALEN, false, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, InvalidOid, C_COLLATION_OID,
++ 	F_NAMEIN, F_NAMEOUT},
++-	{"regclass", REGCLASSOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"regclass", REGCLASSOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+++		InvalidOid, InvalidOid,
++ 	F_REGCLASSIN, F_REGCLASSOUT},
++-	{"regproc", REGPROCOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"regproc", REGPROCOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+++		InvalidOid, InvalidOid,
++ 	F_REGPROCIN, F_REGPROCOUT},
++-	{"regtype", REGTYPEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"regtype", REGTYPEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+++		InvalidOid, InvalidOid,
++ 	F_REGTYPEIN, F_REGTYPEOUT},
++-	{"regrole", REGROLEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"regrole", REGROLEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+++		InvalidOid, InvalidOid,
++ 	F_REGROLEIN, F_REGROLEOUT},
++-	{"regnamespace", REGNAMESPACEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"regnamespace", REGNAMESPACEOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_REGNAMESPACEIN, F_REGNAMESPACEOUT},
++-	{"text", TEXTOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
+++	{"text", TEXTOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  DEFAULT_COLLATION_OID,
++ 	F_TEXTIN, F_TEXTOUT},
++-	{"oid", OIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"oid", OIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_OIDIN, F_OIDOUT},
++-	{"tid", TIDOID, 0, 6, false, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"tid", TIDOID, 0, 6, false, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_TIDIN, F_TIDOUT},
++-	{"xid", XIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"xid", XIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_XIDIN, F_XIDOUT},
++-	{"cid", CIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"cid", CIDOID, 0, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_CIDIN, F_CIDOUT},
++-	{"pg_node_tree", PG_NODE_TREEOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
+++	{"pg_node_tree", PG_NODE_TREEOID, 0, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  DEFAULT_COLLATION_OID,
++ 	F_PG_NODE_TREE_IN, F_PG_NODE_TREE_OUT},
++-	{"int2vector", INT2VECTOROID, INT2OID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"int2vector", INT2VECTOROID, INT2OID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_INT2VECTORIN, F_INT2VECTOROUT},
++-	{"oidvector", OIDVECTOROID, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid,
+++	{"oidvector", OIDVECTOROID, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_PLAIN, InvalidOid, InvalidOid,
++ 	F_OIDVECTORIN, F_OIDVECTOROUT},
++-	{"_int4", INT4ARRAYOID, INT4OID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
+++	{"_int4", INT4ARRAYOID, INT4OID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  InvalidOid,
++ 	F_ARRAY_IN, F_ARRAY_OUT},
++-	{"_text", 1009, TEXTOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_COLLATION_OID,
+++	{"_text", 1009, TEXTOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  DEFAULT_COLLATION_OID,
++ 	F_ARRAY_IN, F_ARRAY_OUT},
++-	{"_oid", 1028, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
+++	{"_oid", 1028, OIDOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  InvalidOid,
++ 	F_ARRAY_IN, F_ARRAY_OUT},
++-	{"_char", 1002, CHAROID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
+++	{"_char", 1002, CHAROID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID,  InvalidOid,
++ 	F_ARRAY_IN, F_ARRAY_OUT},
++-	{"_aclitem", 1034, ACLITEMOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, InvalidOid,
+++	{"_aclitem", 1034, ACLITEMOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, DEFAULT_TOASTER_OID, InvalidOid,
++ 	F_ARRAY_IN, F_ARRAY_OUT}
++ };
++ 
++@@ -546,6 +554,9 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
++ 		attrtypes[attnum]->attbyval = Ap->am_typ.typbyval;
++ 		attrtypes[attnum]->attalign = Ap->am_typ.typalign;
++ 		attrtypes[attnum]->attstorage = Ap->am_typ.typstorage;
+++		attrtypes[attnum]->atttoaster =
+++			(Ap->am_typ.typstorage == TYPSTORAGE_PLAIN) ?
+++				InvalidOid : DEFAULT_TOASTER_OID;
++ 		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
++ 		attrtypes[attnum]->attcollation = Ap->am_typ.typcollation;
++ 		/* if an array type, assume 1-dimensional attribute */
++@@ -561,6 +572,7 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
++ 		attrtypes[attnum]->attbyval = TypInfo[typeoid].byval;
++ 		attrtypes[attnum]->attalign = TypInfo[typeoid].align;
++ 		attrtypes[attnum]->attstorage = TypInfo[typeoid].storage;
+++		attrtypes[attnum]->atttoaster = TypInfo[typeoid].toaster;
++ 		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
++ 		attrtypes[attnum]->attcollation = TypInfo[typeoid].collation;
++ 		/* if an array type, assume 1-dimensional attribute */
++diff --git a/src/backend/catalog/Makefile b/src/backend/catalog/Makefile
++index c090094..2ab7af7 100644
++--- a/src/backend/catalog/Makefile
+++++ b/src/backend/catalog/Makefile
++@@ -44,6 +44,7 @@ OBJS = \
++ 	pg_range.o \
++ 	pg_shdepend.o \
++ 	pg_subscription.o \
+++	pg_toaster.o \
++ 	pg_type.o \
++ 	storage.o \
++ 	toasting.o
++diff --git a/src/backend/catalog/aclchk.c b/src/backend/catalog/aclchk.c
++index 1781648..805d382 100644
++--- a/src/backend/catalog/aclchk.c
+++++ b/src/backend/catalog/aclchk.c
++@@ -2782,6 +2782,7 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
++ 					case OBJECT_ROLE:
++ 					case OBJECT_RULE:
++ 					case OBJECT_TABCONSTRAINT:
+++					case OBJECT_TOASTER:
++ 					case OBJECT_TRANSFORM:
++ 					case OBJECT_TRIGGER:
++ 					case OBJECT_TSPARSER:
++@@ -2921,6 +2922,7 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
++ 					case OBJECT_PUBLICATION_NAMESPACE:
++ 					case OBJECT_PUBLICATION_REL:
++ 					case OBJECT_ROLE:
+++					case OBJECT_TOASTER:
++ 					case OBJECT_TRANSFORM:
++ 					case OBJECT_TSPARSER:
++ 					case OBJECT_TSTEMPLATE:
++diff --git a/src/backend/catalog/dependency.c b/src/backend/catalog/dependency.c
++index 18316a3..26a595c 100644
++--- a/src/backend/catalog/dependency.c
+++++ b/src/backend/catalog/dependency.c
++@@ -57,6 +57,7 @@
++ #include "catalog/pg_statistic_ext.h"
++ #include "catalog/pg_subscription.h"
++ #include "catalog/pg_tablespace.h"
+++#include "catalog/pg_toaster.h"
++ #include "catalog/pg_transform.h"
++ #include "catalog/pg_trigger.h"
++ #include "catalog/pg_ts_config.h"
++@@ -1467,9 +1468,12 @@ doDeletion(const ObjectAddress *object, int flags)
++ 			DropObjectById(object);
++ 			break;
++ 
++-			/*
++-			 * These global object types are not supported here.
++-			 */
+++		case ToasterRelationId:
+++            elog(ERROR, "toaster cannot be deleted by doDeletion");
+++            break;
+++		/*
+++		 * These global object types are not supported here.
+++		 */
++ 		case AuthIdRelationId:
++ 		case DatabaseRelationId:
++ 		case TableSpaceRelationId:
++diff --git a/src/backend/catalog/genbki.pl b/src/backend/catalog/genbki.pl
++index df3231f..2fba626 100644
++--- a/src/backend/catalog/genbki.pl
+++++ b/src/backend/catalog/genbki.pl
++@@ -218,6 +218,10 @@ my $C_COLLATION_OID =
++   Catalog::FindDefinedSymbolFromData($catalog_data{pg_collation},
++ 	'C_COLLATION_OID');
++ 
+++my $DEFAULT_TOASTER_OID =
+++  Catalog::FindDefinedSymbolFromData($catalog_data{pg_toaster},
+++									'DEFAULT_TOASTER_OID');
+++
++ 
++ # Fill in pg_class.relnatts by looking at the referenced catalog's schema.
++ # This is ugly but there's no better place; Catalog::AddDefaultValues
++@@ -952,6 +956,8 @@ sub morph_row_for_pgattr
++ 	$row->{attbyval} = $type->{typbyval};
++ 	$row->{attalign} = $type->{typalign};
++ 	$row->{attstorage} = $type->{typstorage};
+++	$row->{atttoaster}     =
+++		($row->{attstorage} ne 'p' ) ?  $DEFAULT_TOASTER_OID : 0;
++ 
++ 	# set attndims if it's an array type
++ 	$row->{attndims} = $type->{typcategory} eq 'A' ? '1' : '0';
++diff --git a/src/backend/catalog/meson.build b/src/backend/catalog/meson.build
++index 1958ea9..7dbfa55 100644
++--- a/src/backend/catalog/meson.build
+++++ b/src/backend/catalog/meson.build
++@@ -31,6 +31,7 @@ backend_sources += files(
++   'pg_range.c',
++   'pg_shdepend.c',
++   'pg_subscription.c',
+++  'pg_toaster.c',
++   'pg_type.c',
++   'storage.c',
++   'toasting.c',
++diff --git a/src/backend/catalog/objectaddress.c b/src/backend/catalog/objectaddress.c
++index b63fd57..efc9274 100644
++--- a/src/backend/catalog/objectaddress.c
+++++ b/src/backend/catalog/objectaddress.c
++@@ -54,6 +54,7 @@
++ #include "catalog/pg_statistic_ext.h"
++ #include "catalog/pg_subscription.h"
++ #include "catalog/pg_tablespace.h"
+++#include "catalog/pg_toaster.h"
++ #include "catalog/pg_transform.h"
++ #include "catalog/pg_trigger.h"
++ #include "catalog/pg_ts_config.h"
++@@ -766,6 +767,10 @@ static const struct object_type_map
++ 	{
++ 		"schema", OBJECT_SCHEMA
++ 	},
+++	/* OCLASS_STATISTIC_EXT */
+++	{
+++		"statistics object", OBJECT_STATISTIC_EXT
+++	},	
++ 	{
++ 		"text search parser", OBJECT_TSPARSER
++ 	},
++@@ -1005,8 +1010,9 @@ get_object_address(ObjectType objtype, Node *object,
++ 			case OBJECT_ACCESS_METHOD:
++ 			case OBJECT_PUBLICATION:
++ 			case OBJECT_SUBSCRIPTION:
+++			case OBJECT_TOASTER:
++ 				address = get_object_address_unqualified(objtype,
++-														 castNode(String, object), missing_ok);
+++												 castNode(String, object), missing_ok);
++ 				break;
++ 			case OBJECT_TYPE:
++ 			case OBJECT_DOMAIN:
++@@ -1260,6 +1266,11 @@ get_object_address_unqualified(ObjectType objtype,
++ 			address.objectId = get_am_oid(name, missing_ok);
++ 			address.objectSubId = 0;
++ 			break;
+++		case OBJECT_TOASTER:
+++			address.classId = ToasterRelationId;
+++			address.objectId = get_toaster_oid(name, missing_ok);
+++			address.objectSubId = 0;
+++			break;
++ 		case OBJECT_DATABASE:
++ 			address.classId = DatabaseRelationId;
++ 			address.objectId = get_database_oid(name, missing_ok);
++@@ -2311,6 +2322,7 @@ pg_get_object_address(PG_FUNCTION_ARGS)
++ 		case OBJECT_SCHEMA:
++ 		case OBJECT_SUBSCRIPTION:
++ 		case OBJECT_TABLESPACE:
+++		case OBJECT_TOASTER:
++ 			if (list_length(name) != 1)
++ 				ereport(ERROR,
++ 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
++@@ -2544,6 +2556,7 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
++ 		case OBJECT_TSTEMPLATE:
++ 		case OBJECT_ACCESS_METHOD:
++ 		case OBJECT_PARAMETER_ACL:
+++		case OBJECT_TOASTER:
++ 			/* We treat these object types as being owned by superusers */
++ 			if (!superuser_arg(roleid))
++ 				ereport(ERROR,
++@@ -4068,6 +4081,26 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
++ 				break;
++ 			}
++ 
+++		case OCLASS_TOASTER:
+++			{
+++				HeapTuple	tup;
+++
+++				tup = SearchSysCache1(TOASTEROID,
+++									  ObjectIdGetDatum(object->objectId));
+++				if (!HeapTupleIsValid(tup))
+++				{
+++					if (!missing_ok)
+++						elog(ERROR, "cache lookup failed for toaster %u",
+++							 object->objectId);
+++					break;
+++				}
+++
+++				appendStringInfo(&buffer, _("toaster %s"),
+++								 NameStr(((Form_pg_toaster) GETSTRUCT(tup))->tsrname));
+++				ReleaseSysCache(tup);
+++				break;
+++			}
+++
++ 		default:
++ 			elog(ERROR, "unsupported object class: %u", object->classId);
++ 	}
++@@ -4670,6 +4703,11 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
++ 			appendStringInfoString(&buffer, "transform");
++ 			break;
++ 
+++		case OCLASS_TOASTER:
+++			appendStringInfoString(&buffer, "toaster");
+++			break;
+++
+++
++ 		default:
++ 			elog(ERROR, "unsupported object class: %u", object->classId);
++ 	}
++@@ -6020,6 +6058,25 @@ getObjectIdentityParts(const ObjectAddress *object,
++ 			}
++ 			break;
++ 
+++		case OCLASS_TOASTER:
+++			{
+++				char	   *tsrname;
+++
+++				tsrname = get_toaster_name(object->objectId);
+++				if (!tsrname)
+++				{
+++					if (!missing_ok)
+++						elog(ERROR, "cache lookup failed for toaster %u",
+++							 object->objectId);
+++					break;
+++				}
+++				appendStringInfoString(&buffer, quote_identifier(tsrname));
+++				if (objname)
+++					*objname = list_make1(tsrname);
+++			}
+++			break;
+++
+++
++ 		default:
++ 			elog(ERROR, "unsupported object class: %u", object->classId);
++ 	}
++diff --git a/src/backend/catalog/pg_toaster.c b/src/backend/catalog/pg_toaster.c
++new file mode 100644
++index 0000000..feda249
++--- /dev/null
+++++ b/src/backend/catalog/pg_toaster.c
++@@ -0,0 +1,43 @@
+++/*-------------------------------------------------------------------------
+++ *
+++ * pg_toaster.c
+++ *		PG_Toaster functions
+++ *
+++ * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+++ * Portions Copyright (c) 1994, Regents of the University of California
+++ *
+++ * IDENTIFICATION
+++ *		src/backend/catalog/pg_toaster.c
+++ *
+++ *-------------------------------------------------------------------------
+++ */
+++
+++#include "postgres.h"
+++
+++#include "access/genam.h"
+++#include "access/heapam.h"
+++#include "access/htup_details.h"
+++#include "access/toasterapi.h"
+++#include "access/xact.h"
+++#include "catalog/indexing.h"
+++#include "catalog/pg_toaster.h"
+++#include "catalog/pg_type.h"
+++#include "miscadmin.h"
+++#include "nodes/makefuncs.h"
+++#include "storage/lmgr.h"
+++#include "utils/array.h"
+++#include "utils/builtins.h"
+++#include "utils/fmgroids.h"
+++#include "utils/lsyscache.h"
+++#include "utils/pg_lsn.h"
+++#include "utils/rel.h"
+++#include "utils/syscache.h"
+++
+++Datum
+++default_toaster_handler(PG_FUNCTION_ARGS)
+++{
+++	TsrRoutine	*tsr = makeNode(TsrRoutine);
+++
+++	PG_RETURN_POINTER(tsr);
+++}
+++
++diff --git a/src/backend/commands/Makefile b/src/backend/commands/Makefile
++index cb2fbdc..7722eb6 100644
++--- a/src/backend/commands/Makefile
+++++ b/src/backend/commands/Makefile
++@@ -59,6 +59,7 @@ OBJS = \
++ 	tablespace.o \
++ 	trigger.o \
++ 	tsearchcmds.o \
+++	toastercmds.o \
++ 	typecmds.o \
++ 	user.o \
++ 	vacuum.o \
++diff --git a/src/backend/commands/alter.c b/src/backend/commands/alter.c
++index c801c86..b54d526 100644
++--- a/src/backend/commands/alter.c
+++++ b/src/backend/commands/alter.c
++@@ -65,6 +65,7 @@
++ #include "utils/lsyscache.h"
++ #include "utils/rel.h"
++ #include "utils/syscache.h"
+++#include "catalog/pg_toaster.h"
++ 
++ static Oid	AlterObjectNamespace_internal(Relation rel, Oid objid, Oid nspOid);
++ 
++diff --git a/src/backend/commands/dropcmds.c b/src/backend/commands/dropcmds.c
++index ceb9a22..cad1d44 100644
++--- a/src/backend/commands/dropcmds.c
+++++ b/src/backend/commands/dropcmds.c
++@@ -252,6 +252,10 @@ does_not_exist_skipping(ObjectType objtype, Node *object)
++ 			msg = gettext_noop("access method \"%s\" does not exist, skipping");
++ 			name = strVal(object);
++ 			break;
+++		case OBJECT_TOASTER:
+++			msg = gettext_noop("toaster \"%s\" does not exist, skipping");
+++			name = strVal(object);
+++			break;
++ 		case OBJECT_TYPE:
++ 		case OBJECT_DOMAIN:
++ 			{
++diff --git a/src/backend/commands/event_trigger.c b/src/backend/commands/event_trigger.c
++index 8a61317..d6f58cd 100644
++--- a/src/backend/commands/event_trigger.c
+++++ b/src/backend/commands/event_trigger.c
++@@ -2310,6 +2310,7 @@ stringify_grant_objtype(ObjectType objtype)
++ 		case OBJECT_STATISTIC_EXT:
++ 		case OBJECT_SUBSCRIPTION:
++ 		case OBJECT_TABCONSTRAINT:
+++		case OBJECT_TOASTER:
++ 		case OBJECT_TRANSFORM:
++ 		case OBJECT_TRIGGER:
++ 		case OBJECT_TSCONFIGURATION:
++@@ -2394,6 +2395,7 @@ stringify_adefprivs_objtype(ObjectType objtype)
++ 		case OBJECT_STATISTIC_EXT:
++ 		case OBJECT_SUBSCRIPTION:
++ 		case OBJECT_TABCONSTRAINT:
+++		case OBJECT_TOASTER:
++ 		case OBJECT_TRANSFORM:
++ 		case OBJECT_TRIGGER:
++ 		case OBJECT_TSCONFIGURATION:
++diff --git a/src/backend/commands/seclabel.c b/src/backend/commands/seclabel.c
++index cee5d7b..2f49a79 100644
++--- a/src/backend/commands/seclabel.c
+++++ b/src/backend/commands/seclabel.c
++@@ -85,6 +85,7 @@ SecLabelSupportsObjectType(ObjectType objtype)
++ 		case OBJECT_RULE:
++ 		case OBJECT_STATISTIC_EXT:
++ 		case OBJECT_TABCONSTRAINT:
+++		case OBJECT_TOASTER:
++ 		case OBJECT_TRANSFORM:
++ 		case OBJECT_TRIGGER:
++ 		case OBJECT_TSCONFIGURATION:
++diff --git a/src/backend/nodes/Makefile b/src/backend/nodes/Makefile
++index 77ddb9c..b11d266 100644
++--- a/src/backend/nodes/Makefile
+++++ b/src/backend/nodes/Makefile
++@@ -50,6 +50,7 @@ node_headers = \
++ 	access/sdir.h \
++ 	access/tableam.h \
++ 	access/tsmapi.h \
+++	access/toasterapi.h \
++ 	commands/event_trigger.h \
++ 	commands/trigger.h \
++ 	executor/tuptable.h \
++diff --git a/src/backend/nodes/gen_node_support.pl b/src/backend/nodes/gen_node_support.pl
++index 214d2c7..b154923 100644
++--- a/src/backend/nodes/gen_node_support.pl
+++++ b/src/backend/nodes/gen_node_support.pl
++@@ -62,6 +62,7 @@ my @all_input_files = qw(
++   access/sdir.h
++   access/tableam.h
++   access/tsmapi.h
+++  access/toasterapi.h
++   commands/event_trigger.h
++   commands/trigger.h
++   executor/tuptable.h
++@@ -86,6 +87,7 @@ my @nodetag_only_files = qw(
++   access/sdir.h
++   access/tableam.h
++   access/tsmapi.h
+++  access/toasterapi.h
++   commands/event_trigger.h
++   commands/trigger.h
++   executor/tuptable.h
++@@ -108,7 +110,7 @@ my @nodetag_only_files = qw(
++ # ABI stability during development.
++ 
++ my $last_nodetag = 'WindowObjectData';
++-my $last_nodetag_no = 479;
+++my $last_nodetag_no = 483;
++ 
++ # output file names
++ my @output_files;
++diff --git a/src/backend/parser/gram.y b/src/backend/parser/gram.y
++index 03c80ea..8461ffa 100644
++--- a/src/backend/parser/gram.y
+++++ b/src/backend/parser/gram.y
++@@ -195,6 +195,7 @@ static RangeVar *makeRangeVarFromQualifiedName(char *name, List *namelist, int l
++ 											   core_yyscan_t yyscanner);
++ static void SplitColQualList(List *qualList,
++ 							 List **constraintList, CollateClause **collClause,
+++							 char **toaster_name,
++ 							 core_yyscan_t yyscanner);
++ static void processCASbits(int cas_bits, int location, const char *constrType,
++ 			   bool *deferrable, bool *initdeferred, bool *is_enforced,
++@@ -309,6 +310,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
++ 		CreateMatViewStmt RefreshMatViewStmt CreateAmStmt
++ 		CreatePublicationStmt AlterPublicationStmt
++ 		CreateSubscriptionStmt AlterSubscriptionStmt DropSubscriptionStmt
+++		CreateToasterStmt
++ 
++ %type <node>	select_no_parens select_with_parens select_clause
++ 				simple_select values_clause
++@@ -775,7 +777,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
++ 	SUBSCRIPTION SUBSTRING SUPPORT SYMMETRIC SYSID SYSTEM_P SYSTEM_USER
++ 
++ 	TABLE TABLES TABLESAMPLE TABLESPACE TARGET TEMP TEMPLATE TEMPORARY TEXT_P THEN
++-	TIES TIME TIMESTAMP TO TRAILING TRANSACTION TRANSFORM
+++	TIES TIME TIMESTAMP TO TOASTER TRAILING TRANSACTION TRANSFORM
++ 	TREAT TRIGGER TRIM TRUE_P
++ 	TRUNCATE TRUSTED TYPE_P TYPES_P
++ 
++@@ -1054,6 +1056,7 @@ stmt:
++ 			| CreateSubscriptionStmt
++ 			| CreateStatsStmt
++ 			| CreateTableSpaceStmt
+++			| CreateToasterStmt
++ 			| CreateTransformStmt
++ 			| CreateTrigStmt
++ 			| CreateEventTrigStmt
++@@ -2450,6 +2453,15 @@ alter_table_cmd:
++ 					n->name = $3;
++ 					$$ = (Node *) n;
++ 				}
+++			/* ALTER TABLE <name> ALTER [COLUMN] <colname> SET TOASTER <toaster_name> */
+++			| ALTER opt_column ColId SET TOASTER name
+++				{
+++					AlterTableCmd *n = makeNode(AlterTableCmd);
+++					n->subtype = AT_SetToaster;
+++					n->name = $3;
+++					n->def = (Node *) makeString($6);
+++					$$ = (Node *)n;
+++				}
++ 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> SET EXPRESSION AS <expr> */
++ 			| ALTER opt_column ColId SET EXPRESSION AS '(' a_expr ')'
++ 				{
++@@ -3829,7 +3841,7 @@ columnDef:	ColId Typename opt_column_storage opt_column_compression create_gener
++ 					n->collOid = InvalidOid;
++ 					n->fdwoptions = $5;
++ 					SplitColQualList($6, &n->constraints, &n->collClause,
++-									 yyscanner);
+++									&n->toaster, yyscanner);
++ 					n->location = @1;
++ 					$$ = (Node *) n;
++ 				}
++@@ -3850,7 +3862,7 @@ columnOptions:	ColId ColQualList
++ 					n->cooked_default = NULL;
++ 					n->collOid = InvalidOid;
++ 					SplitColQualList($2, &n->constraints, &n->collClause,
++-									 yyscanner);
+++									 &n->toaster, yyscanner);
++ 					n->location = @1;
++ 					$$ = (Node *) n;
++ 				}
++@@ -3869,7 +3881,7 @@ columnOptions:	ColId ColQualList
++ 					n->cooked_default = NULL;
++ 					n->collOid = InvalidOid;
++ 					SplitColQualList($4, &n->constraints, &n->collClause,
++-									 yyscanner);
+++									 &n->toaster, yyscanner);
++ 					n->location = @1;
++ 					$$ = (Node *) n;
++ 				}
++@@ -3925,6 +3937,15 @@ ColConstraint:
++ 					n->location = @1;
++ 					$$ = (Node *) n;
++ 				}
+++				| TOASTER name
+++				{
+++					/*
+++					 * Note: the toaster name is momentarily included in
+++					 * the list built by ColQualList, but we split it out
+++					 * again in SplitColQualList.
+++					 */
+++					$$ = (Node *) makeString($2);
+++				}
++ 		;
++ 
++ /* DEFAULT NULL is already the default for Postgres.
++@@ -5418,6 +5439,15 @@ AlterExtensionContentsStmt:
++ 					n->object = (Node *) $6;
++ 					$$ = (Node *) n;
++ 				}
+++			| ALTER EXTENSION name add_drop TOASTER name
+++				{
+++					AlterExtensionContentsStmt *n = makeNode(AlterExtensionContentsStmt);
+++					n->extname = $3;
+++					n->action = $4;
+++					n->objtype = OBJECT_TOASTER;
+++					n->object = (Node *) makeString($6);
+++					$$ = (Node *)n;
+++				}
++ 			| ALTER EXTENSION name add_drop TRANSFORM FOR Typename LANGUAGE name
++ 				{
++ 					AlterExtensionContentsStmt *n = makeNode(AlterExtensionContentsStmt);
++@@ -6004,6 +6034,32 @@ am_type:
++ 		|	TABLE			{ $$ = AMTYPE_TABLE; }
++ 		;
++ 
+++/*****************************************************************************
+++ *
+++ *		QUERY:
+++ *				CREATE TOASTER name HANDLER	handler_name
+++ *
+++ *****************************************************************************/
+++
+++CreateToasterStmt:
+++	CREATE TOASTER IF_P NOT EXISTS name HANDLER handler_name
+++		{
+++			CreateToasterStmt *n = makeNode(CreateToasterStmt);
+++			n->if_not_exists = true;
+++			n->tsrname = $6;
+++			n->handler_name = $8;
+++			$$ = (Node *) n;
+++		}
+++	| CREATE TOASTER name HANDLER handler_name
+++		{
+++			CreateToasterStmt *n = makeNode(CreateToasterStmt);
+++			n->tsrname = $3;
+++			n->handler_name = $5;
+++			n->if_not_exists = false;
+++			$$ = (Node *) n;
+++		}
+++		;
+++
++ /*****************************************************************************
++  *
++  *		QUERIES :
++@@ -7166,6 +7222,14 @@ CommentStmt:
++ 					n->comment = $6;
++ 					$$ = (Node *) n;
++ 				}
+++			| COMMENT ON TOASTER name IS comment_text
+++				{
+++					CommentStmt *n = makeNode(CommentStmt);
+++					n->objtype = OBJECT_TOASTER;
+++					n->object = (Node *) makeString($4);
+++					n->comment = $6;
+++					$$ = (Node *) n;
+++				}
++ 			| COMMENT ON object_type_name name IS comment_text
++ 				{
++ 					CommentStmt *n = makeNode(CommentStmt);
++@@ -11622,7 +11686,7 @@ CreateDomainStmt:
++ 					n->domainname = $3;
++ 					n->typeName = $5;
++ 					SplitColQualList($6, &n->constraints, &n->collClause,
++-									 yyscanner);
+++									 NULL /* toaster is not allowed*/, yyscanner);
++ 					$$ = (Node *) n;
++ 				}
++ 		;
++@@ -17975,6 +18039,7 @@ unreserved_keyword:
++ 			| TEMPORARY
++ 			| TEXT_P
++ 			| TIES
+++			| TOASTER
++ 			| TRANSACTION
++ 			| TRANSFORM
++ 			| TRIGGER
++@@ -18622,6 +18687,7 @@ bare_label_keyword:
++ 			| TIES
++ 			| TIME
++ 			| TIMESTAMP
+++			| TOASTER
++ 			| TRAILING
++ 			| TRANSACTION
++ 			| TRANSFORM
++@@ -19401,10 +19467,10 @@ makeRangeVarFromQualifiedName(char *name, List *namelist, int location,
++ 	return r;
++ }
++ 
++-/* Separate Constraint nodes from COLLATE clauses in a ColQualList */
++ static void
++ SplitColQualList(List *qualList,
++ 				 List **constraintList, CollateClause **collClause,
+++				 char **toaster_name,
++ 				 core_yyscan_t yyscanner)
++ {
++ 	ListCell   *cell;
++@@ -19419,7 +19485,7 @@ SplitColQualList(List *qualList,
++ 			/* keep it in list */
++ 			continue;
++ 		}
++-		if (IsA(n, CollateClause))
+++		else if (IsA(n, CollateClause))
++ 		{
++ 			CollateClause *c = (CollateClause *) n;
++ 
++@@ -19430,6 +19496,22 @@ SplitColQualList(List *qualList,
++ 						 parser_errposition(c->location)));
++ 			*collClause = c;
++ 		}
+++		else if (IsA(n, String))
+++		{
+++			String	*toaster_val = (String*) n;
+++
+++			if (toaster_name == NULL)
+++				ereport(ERROR,
+++						(errcode(ERRCODE_SYNTAX_ERROR),
+++						 errmsg("TOASTER clause not allowed")));
+++
+++			if (*toaster_name)
+++				ereport(ERROR,
+++						(errcode(ERRCODE_SYNTAX_ERROR),
+++						 errmsg("multiple TOASTER clauses not allowed")));
+++			
+++			*toaster_name = strVal(toaster_val);
+++		}
++ 		else
++ 			elog(ERROR, "unexpected node type %d", (int) n->type);
++ 		/* remove non-Constraint nodes from qualList */
++diff --git a/src/backend/tcop/utility.c b/src/backend/tcop/utility.c
++index 4b8d877..65140fd 100644
++--- a/src/backend/tcop/utility.c
+++++ b/src/backend/tcop/utility.c
++@@ -188,6 +188,7 @@ ClassifyUtilityCommandAsReadOnly(Node *parsetree)
++ 		case T_CreateSubscriptionStmt:
++ 		case T_CreateTableAsStmt:
++ 		case T_CreateTableSpaceStmt:
+++		case T_CreateToasterStmt:
++ 		case T_CreateTransformStmt:
++ 		case T_CreateTrigStmt:
++ 		case T_CreateUserMappingStmt:
++@@ -1842,6 +1843,11 @@ ProcessUtilitySlow(ParseState *pstate,
++ 				address = CreateAccessMethod((CreateAmStmt *) parsetree);
++ 				break;
++ 
+++			case T_CreateToasterStmt:
+++				address = CreateToaster((CreateToasterStmt *) parsetree);
+++				break;
+++
+++
++ 			case T_CreatePublicationStmt:
++ 				address = CreatePublication(pstate, (CreatePublicationStmt *) parsetree);
++ 				break;
++@@ -3048,6 +3054,10 @@ CreateCommandTag(Node *parsetree)
++ 			tag = CMDTAG_CREATE_ACCESS_METHOD;
++ 			break;
++ 
+++		case T_CreateToasterStmt:
+++			tag = CMDTAG_CREATE_TOASTER;
+++			break;
+++
++ 		case T_CreatePublicationStmt:
++ 			tag = CMDTAG_CREATE_PUBLICATION;
++ 			break;
++@@ -3665,6 +3675,10 @@ GetCommandLogLevel(Node *parsetree)
++ 			lev = LOGSTMT_DDL;
++ 			break;
++ 
+++		case T_CreateToasterStmt:
+++			lev = LOGSTMT_DDL;
+++			break;
+++
++ 		case T_CreatePublicationStmt:
++ 			lev = LOGSTMT_DDL;
++ 			break;
++diff --git a/src/backend/utils/adt/pseudotypes.c b/src/backend/utils/adt/pseudotypes.c
++index 317a1f2..ae7709c 100644
++--- a/src/backend/utils/adt/pseudotypes.c
+++++ b/src/backend/utils/adt/pseudotypes.c
++@@ -370,6 +370,7 @@ PSEUDOTYPE_DUMMY_IO_FUNCS(fdw_handler);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(table_am_handler);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(index_am_handler);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(tsm_handler);
+++PSEUDOTYPE_DUMMY_IO_FUNCS(toaster_handler);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(internal);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(anyelement);
++ PSEUDOTYPE_DUMMY_IO_FUNCS(anynonarray);
++diff --git a/src/backend/utils/cache/syscache.c b/src/backend/utils/cache/syscache.c
++index f944453..3114000 100644
++--- a/src/backend/utils/cache/syscache.c
+++++ b/src/backend/utils/cache/syscache.c
++@@ -37,6 +37,8 @@
++ #include "utils/lsyscache.h"
++ #include "utils/rel.h"
++ #include "utils/syscache.h"
+++#include "catalog/pg_toaster.h"
+++
++ 
++ /*---------------------------------------------------------------------------
++ 
++diff --git a/src/include/access/toasterapi.h b/src/include/access/toasterapi.h
++new file mode 100644
++index 0000000..6f9b48e
++--- /dev/null
+++++ b/src/include/access/toasterapi.h
++@@ -0,0 +1,90 @@
+++/*-------------------------------------------------------------------------
+++ *
+++ * toasterapi.h
+++ *	  API for Postgres custom TOAST methods.
+++ *
+++ * Copyright (c) 2015-2021, PostgreSQL Global Development Group
+++ *
+++ * src/include/access/toasterapi.h
+++ *
+++ *-------------------------------------------------------------------------
+++ */
+++#ifndef TOASTERAPI_H
+++#define TOASTERAPI_H
+++
+++#include "access/genam.h"
+++
+++/*
+++ * Callback function signatures --- see indexam.sgml for more info.
+++ */
+++
+++/* Create toast storage */
+++typedef void (*toast_init)(Relation rel, Datum reloptions, LOCKMODE lockmode,
+++						   bool check, Oid OIDOldToast);
+++
+++/* Toast function */
+++typedef Datum (*toast_function) (Relation toast_rel,
+++										   Oid toasterid,
+++										   Datum value,
+++										   Datum oldvalue,
+++										   int max_inline_size,
+++										   int options);
+++
+++/* Update toast function, optional */
+++typedef Datum (*update_toast_function) (Relation toast_rel,
+++												  Oid toasterid,
+++												  Datum newvalue,
+++												  Datum oldvalue,
+++												  int options);
+++
+++/* Copy toast function, optional */
+++typedef Datum (*copy_toast_function) (Relation toast_rel,
+++												Oid toasterid,
+++												Datum newvalue,
+++												int options);
+++
+++/* Detoast function */
+++typedef Datum (*detoast_function) (Relation toast_rel,
+++											 Datum toast_ptr,
+++											 int offset, int length);
+++
+++/* Delete toast function */
+++typedef void (*del_toast_function) (Datum value, bool is_speculative);
+++
+++
+++
+++/* Return virtual table of functions, optional */
+++typedef void * (*get_vtable_function) (Datum toast_ptr);
+++
+++/* validate definition of a toaster Oid */
+++typedef bool (*toastervalidate_function) (Oid typeoid,
+++										  char storage, char compression,
+++										  Oid amoid, bool false_ok);
+++
+++/*
+++ * API struct for Toaster.  Note this must be stored in a single palloc'd
+++ * chunk of memory.
+++ */
+++typedef struct TsrRoutine
+++{
+++	NodeTag		type;
+++
+++	/* interface functions */
+++	toast_init init;
+++	toast_function toast;
+++	update_toast_function update_toast;
+++	copy_toast_function copy_toast;
+++	detoast_function detoast;
+++	del_toast_function deltoast;
+++	get_vtable_function get_vtable;
+++	toastervalidate_function toastervalidate;
+++} TsrRoutine;
+++
+++
+++/* Functions in access/index/toasterapi.c */
+++extern TsrRoutine *GetTsrRoutine(Oid tsrhandler);
+++extern TsrRoutine *GetTsrRoutineByOid(Oid tsroid, bool noerror);
+++extern TsrRoutine *SearchTsrCache(Oid tsroid);
+++extern bool	validateToaster(Oid toasteroid, Oid typeoid, char storage,
+++							char compression, Oid amoid, bool false_ok);
+++#endif							/* TOASTERAPI_H */
++diff --git a/src/include/catalog/Makefile b/src/include/catalog/Makefile
++index 2bbc780..d046a98 100644
++--- a/src/include/catalog/Makefile
+++++ b/src/include/catalog/Makefile
++@@ -81,7 +81,8 @@ CATALOG_HEADERS := \
++ 	pg_publication_namespace.h \
++ 	pg_publication_rel.h \
++ 	pg_subscription.h \
++-	pg_subscription_rel.h
+++	pg_subscription_rel.h\
+++	pg_toaster.h 
++ 
++ GENERATED_HEADERS := $(CATALOG_HEADERS:%.h=%_d.h)
++ 
++diff --git a/src/include/catalog/meson.build b/src/include/catalog/meson.build
++index ec1cf46..665fae5 100644
++--- a/src/include/catalog/meson.build
+++++ b/src/include/catalog/meson.build
++@@ -69,6 +69,7 @@ catalog_headers = [
++   'pg_publication_rel.h',
++   'pg_subscription.h',
++   'pg_subscription_rel.h',
+++  'pg_toaster.h', 
++ ]
++ 
++ # The .dat files we need can just be listed alphabetically.
++@@ -97,6 +98,7 @@ bki_data = [
++   'pg_ts_parser.dat',
++   'pg_ts_template.dat',
++   'pg_type.dat',
+++  'pg_toaster.dat', 
++ ]
++ bki_data_f = files(bki_data)
++ 
++diff --git a/src/include/catalog/pg_attribute.h b/src/include/catalog/pg_attribute.h
++index c612aed..61238cc 100644
++--- a/src/include/catalog/pg_attribute.h
+++++ b/src/include/catalog/pg_attribute.h
++@@ -115,6 +115,12 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
++ 	 * However, this field is ignored whenever attstorage does not allow
++ 	 * compression.
++ 	 */
+++
+++	/*
+++	 * atttoaster keeps toaster for VARLENA attributes with EXTERNAL/EXTENDED
+++	 * storage. Value should be set for any toastable data type.
+++	 */
+++	Oid			atttoaster;
++ 	char		attcompression BKI_DEFAULT('\0');
++ 
++ 	/*
++diff --git a/src/include/catalog/pg_proc.dat b/src/include/catalog/pg_proc.dat
++index fb4f7f5..69c4168 100644
++--- a/src/include/catalog/pg_proc.dat
+++++ b/src/include/catalog/pg_proc.dat
++@@ -7893,6 +7893,13 @@
++   proname => 'table_am_handler_in', proisstrict => 'f',
++   prorettype => 'table_am_handler', proargtypes => 'cstring',
++   prosrc => 'table_am_handler_in' },
+++  { oid => '8889', descr => 'I/O',
+++  proname => 'toaster_handler_out', prorettype => 'cstring',
+++  proargtypes => 'toaster_handler', prosrc => 'toaster_handler_out' },
+++{ oid => '8890', descr => 'I/O',
+++  proname => 'toaster_handler_in', proisstrict => 'f',
+++  prorettype => 'toaster_handler', proargtypes => 'cstring',
+++  prosrc => 'toaster_handler_in' },
++ { oid => '268', descr => 'I/O',
++   proname => 'table_am_handler_out', prorettype => 'cstring',
++   proargtypes => 'table_am_handler', prosrc => 'table_am_handler_out' },
++@@ -12548,3 +12555,9 @@
++   prosrc => 'pg_get_aios' },
++ 
++ ]
+++{ oid => '8893', descr => 'default toaster handler',
+++  proname => 'default_toaster_handler', provolatile => 'v',
+++  prorettype => 'toaster_handler', proargtypes => 'internal',
+++  prosrc => 'default_toaster_handler' },
+++
+++]
++\ No newline at end of file
++diff --git a/src/include/catalog/pg_toaster.dat b/src/include/catalog/pg_toaster.dat
++new file mode 100644
++index 0000000..ccc0142
++--- /dev/null
+++++ b/src/include/catalog/pg_toaster.dat
++@@ -0,0 +1,19 @@
+++#----------------------------------------------------------------------
+++#
+++# pg_toaster.dat
+++#    Initial contents of the pg_toaster system catalog.
+++#
+++# Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+++# Portions Copyright (c) 1994, Regents of the University of California
+++#
+++# src/include/catalog/pg_toaster.dat
+++#
+++#----------------------------------------------------------------------
+++
+++[
+++
+++{ oid => '9864', oid_symbol => 'DEFAULT_TOASTER_OID',
+++  descr => 'default toaster',
+++  tsrname => 'deftoaster', tsrhandler => 'default_toaster_handler' },
+++
+++]
++diff --git a/src/include/catalog/pg_toaster.h b/src/include/catalog/pg_toaster.h
++new file mode 100644
++index 0000000..587dbf9
++--- /dev/null
+++++ b/src/include/catalog/pg_toaster.h
++@@ -0,0 +1,53 @@
+++/*-------------------------------------------------------------------------
+++ *
+++ * pg_toaster.h
+++ *	  definition of the "generalized toaster" system catalog (pg_toaster)
+++ *
+++ *
+++ * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+++ * Portions Copyright (c) 1994, Regents of the University of California
+++ *
+++ * src/include/catalog/pg_toaster.h
+++ *
+++ * NOTES
+++ *	  The Catalog.pm module reads this file and derives schema
+++ *	  information.
+++ *
+++ *-------------------------------------------------------------------------
+++ */
+++#ifndef PG_TOASTER_H
+++#define PG_TOASTER_H
+++
+++#include "catalog/genbki.h"
+++#include "catalog/pg_toaster_d.h"
+++
+++/* ----------------
+++ *		pg_toaster definition.  cpp turns this into
+++ *		typedef struct FormData_pg_toaster
+++ * ----------------
+++ */
+++CATALOG(pg_toaster,9861,ToasterRelationId)
+++{
+++	Oid			oid;			/* oid */
+++
+++	/* toaster name */
+++	NameData	tsrname;
+++
+++	/* handler function */
+++	regproc		tsrhandler BKI_LOOKUP(pg_proc);
+++} FormData_pg_toaster;
+++
+++/* ----------------
+++ *		Form_pg_toaster corresponds to a pointer to a tuple with
+++ *		the format of pg_toaster relation.
+++ * ----------------
+++ */
+++typedef FormData_pg_toaster *Form_pg_toaster;
+++
+++DECLARE_UNIQUE_INDEX(pg_toaster_name_index, 9862, ToasterNameIndexId, pg_toaster, btree(tsrname name_ops));
+++MAKE_SYSCACHE(TOASTERNAME, pg_toaster_name_index, 4);
+++
+++DECLARE_UNIQUE_INDEX_PKEY(pg_toaster_oid_index, 9863, ToasterOidIndexId, pg_toaster, btree(oid oid_ops));
+++MAKE_SYSCACHE(TOASTEROID, pg_toaster_oid_index, 4);
+++//изменен синтаксис DECLARE_UNIQUE_INDEX DECLARE_UNIQUE_INDEX_PKEY для корректной работы genki.pl, добавлены макросы для нового syscache
+++#endif							/* PG_TOASTER_H */
++diff --git a/src/include/catalog/pg_type.dat b/src/include/catalog/pg_type.dat
++index 6dca77e..9cd79d0 100644
++--- a/src/include/catalog/pg_type.dat
+++++ b/src/include/catalog/pg_type.dat
++@@ -639,6 +639,11 @@
++   typcategory => 'P', typinput => 'table_am_handler_in',
++   typoutput => 'table_am_handler_out', typreceive => '-', typsend => '-',
++   typalign => 'i' },
+++  { oid => '8888',
+++  typname => 'toaster_handler', typlen => '4', typbyval => 't', typtype => 'p',
+++  typcategory => 'P', typinput => 'toaster_handler_in',
+++  typoutput => 'toaster_handler_out', typreceive => '-', typsend => '-',
+++  typalign => 'i' },
++ { oid => '3831',
++   descr => 'pseudo-type representing a range over a polymorphic base type',
++   typname => 'anyrange', typlen => '-1', typbyval => 'f', typtype => 'p',
++diff --git a/src/include/commands/defrem.h b/src/include/commands/defrem.h
++index f3432b4..04744b5 100644
++--- a/src/include/commands/defrem.h
+++++ b/src/include/commands/defrem.h
++@@ -148,6 +148,11 @@ extern Oid	get_table_am_oid(const char *amname, bool missing_ok);
++ extern Oid	get_am_oid(const char *amname, bool missing_ok);
++ extern char *get_am_name(Oid amOid);
++ 
+++/* commands/toastercmds.c */
+++extern ObjectAddress CreateToaster(CreateToasterStmt *stmt);
+++extern Oid get_toaster_oid(const char *tsrname, bool missing_ok);
+++extern char *get_toaster_name(Oid tsrOid);
+++
++ /* support routines in commands/define.c */
++ 
++ extern char *defGetString(DefElem *def);
++diff --git a/src/include/nodes/meson.build b/src/include/nodes/meson.build
++index d1ca24d..7527a87 100644
++--- a/src/include/nodes/meson.build
+++++ b/src/include/nodes/meson.build
++@@ -12,6 +12,7 @@ node_support_input_i = [
++   'access/sdir.h',
++   'access/tableam.h',
++   'access/tsmapi.h',
+++  'access/toasterapi.h',
++   'commands/event_trigger.h',
++   'commands/trigger.h',
++   'executor/tuptable.h',
++diff --git a/src/include/nodes/parsenodes.h b/src/include/nodes/parsenodes.h
++index 161b09f..f135696 100644
++--- a/src/include/nodes/parsenodes.h
+++++ b/src/include/nodes/parsenodes.h
++@@ -764,6 +764,8 @@ typedef struct ColumnDef
++ 	RangeVar   *identitySequence;	/* to store identity sequence name for
++ 									 * ALTER TABLE ... ADD COLUMN */
++ 	char		generated;		/* attgenerated setting */
+++	char	   *toaster;		/* toaster name or NULL for default */
+++
++ 	CollateClause *collClause;	/* untransformed COLLATE spec, if any */
++ 	Oid			collOid;		/* collation OID (InvalidOid if not set) */
++ 	List	   *constraints;	/* other constraints on column */
++@@ -2058,6 +2060,37 @@ typedef struct JsonArrayAgg
++ 	bool		absent_on_null; /* skip NULL elements? */
++ } JsonArrayAgg;
++ 
+++/*
+++ * JsonTransform -
+++ *		untransformed representation of JSON_MODIFY()
+++ */
+++typedef struct JsonTransform
+++{
+++	NodeTag		type;
+++	JsonValueExpr *expr;		/* context item expression */
+++	List	   *ops;			/* list of operations */
+++	JsonOutput *output;			/* output clause, if specified */
+++	List	   *passing;		/* list of PASSING clause arguments, if any */
+++	int			location;		/* token location, or -1 if unknown */
+++} JsonTransform;
+++
+++/*
+++ * JsonTransformOp -
+++ *		untransformed representation of JSON_MODIFY() operations
+++ */
+++typedef struct JsonTransformOp
+++{
+++	NodeTag		type;
+++	Node	   *pathspec;
+++	Node	   *expr;
+++	JsonTransformOpType op_type;
+++	JsonTransformBehavior on_existing;
+++	JsonTransformBehavior on_missing;
+++	JsonTransformBehavior on_null;
+++	int			location;		/* token location, or -1 if unknown */
+++} JsonTransformOp;
+++
+++
++ 
++ /*****************************************************************************
++  *		Raw Grammar Output Statements
++@@ -2362,6 +2395,7 @@ typedef enum ObjectType
++ 	OBJECT_TABCONSTRAINT,
++ 	OBJECT_TABLE,
++ 	OBJECT_TABLESPACE,
+++	OBJECT_TOASTER,
++ 	OBJECT_TRANSFORM,
++ 	OBJECT_TRIGGER,
++ 	OBJECT_TSCONFIGURATION,
++@@ -2477,6 +2511,7 @@ typedef enum AlterTableType
++ 	AT_SetIdentity,				/* SET identity column options */
++ 	AT_DropIdentity,			/* DROP IDENTITY */
++ 	AT_ReAddStatistics,			/* internal to commands/tablecmds.c */
+++	AT_SetToaster,			    /* alter column set toaster */
++ } AlterTableType;
++ 
++ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
++@@ -3093,6 +3128,19 @@ typedef struct CreateAmStmt
++ 	char		amtype;			/* type of access method */
++ } CreateAmStmt;
++ 
+++/*----------------------
+++ *		Create TOASTER Statement
+++ *----------------------
+++ */
+++typedef struct CreateToasterStmt
+++{
+++	NodeTag		type;
+++	char	   *tsrname;			/* toaster name */
+++	List	   *handler_name;	/* handler function name */
+++	bool		if_not_exists;
+++} CreateToasterStmt;
+++
+++
++ /* ----------------------
++  *		Create TRIGGER Statement
++  * ----------------------
++diff --git a/src/include/parser/kwlist.h b/src/include/parser/kwlist.h
++index a4af3f7..fb06fdf 100644
++--- a/src/include/parser/kwlist.h
+++++ b/src/include/parser/kwlist.h
++@@ -454,6 +454,7 @@ PG_KEYWORD("ties", TIES, UNRESERVED_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("time", TIME, COL_NAME_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("timestamp", TIMESTAMP, COL_NAME_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("to", TO, RESERVED_KEYWORD, AS_LABEL)
+++PG_KEYWORD("toaster", TOASTER, UNRESERVED_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("trailing", TRAILING, RESERVED_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("transaction", TRANSACTION, UNRESERVED_KEYWORD, BARE_LABEL)
++ PG_KEYWORD("transform", TRANSFORM, UNRESERVED_KEYWORD, BARE_LABEL)
++diff --git a/src/include/tcop/cmdtaglist.h b/src/include/tcop/cmdtaglist.h
++index d250a71..34405fb 100644
++--- a/src/include/tcop/cmdtaglist.h
+++++ b/src/include/tcop/cmdtaglist.h
++@@ -119,6 +119,7 @@ PG_CMDTAG(CMDTAG_CREATE_TEXT_SEARCH_CONFIGURATION, "CREATE TEXT SEARCH CONFIGURA
++ PG_CMDTAG(CMDTAG_CREATE_TEXT_SEARCH_DICTIONARY, "CREATE TEXT SEARCH DICTIONARY", true, false, false)
++ PG_CMDTAG(CMDTAG_CREATE_TEXT_SEARCH_PARSER, "CREATE TEXT SEARCH PARSER", true, false, false)
++ PG_CMDTAG(CMDTAG_CREATE_TEXT_SEARCH_TEMPLATE, "CREATE TEXT SEARCH TEMPLATE", true, false, false)
+++PG_CMDTAG(CMDTAG_CREATE_TOASTER, "CREATE TOASTER", true, false, false)
++ PG_CMDTAG(CMDTAG_CREATE_TRANSFORM, "CREATE TRANSFORM", true, false, false)
++ PG_CMDTAG(CMDTAG_CREATE_TRIGGER, "CREATE TRIGGER", true, false, false)
++ PG_CMDTAG(CMDTAG_CREATE_TYPE, "CREATE TYPE", true, false, false)
++diff --git a/src/include/varatt.h b/src/include/varatt.h
++index 2e8564d..28b581e 100644
++--- a/src/include/varatt.h
+++++ b/src/include/varatt.h
++@@ -38,6 +38,31 @@ typedef struct varatt_external
++ 	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
++ }			varatt_external;
++ 
+++typedef struct uint32align16
+++{
+++	uint16	hi;
+++	uint16	lo;
+++} uint32align16;
+++
+++#define set_uint32align16(p, v)	\
+++	( \
+++		(p)->hi = (v) >> 16, \
+++		(p)->lo = (v) & 0xffff \
+++	)
+++
+++#define get_uint32align16(p)	\
+++	(((uint32)((p)->hi)) << 16 | ((uint32)((p)->lo)))
+++
+++/* varatt_custom uses 16bit aligment */
+++typedef struct varatt_custom
+++{
+++	uint16			va_toasterdatalen;/* total size of toast pointer, < BLCKSZ */
+++	uint32align16	va_rawsize;		/* Original data size (includes header) */
+++	uint32align16	va_toasterid;	/* Toaster ID, actually Oid */
+++	char		va_toasterdata[FLEXIBLE_ARRAY_MEMBER];	/* Custom toaster data */
+++}			varatt_custom;
+++
+++
++ /*
++  * These macros define the "saved size" portion of va_extinfo.  Its remaining
++  * two high-order bits identify the compression method.
++@@ -86,6 +111,7 @@ typedef enum vartag_external
++ 	VARTAG_INDIRECT = 1,
++ 	VARTAG_EXPANDED_RO = 2,
++ 	VARTAG_EXPANDED_RW = 3,
+++	VARTAG_CUSTOM = 4,
++ 	VARTAG_ONDISK = 18
++ } vartag_external;
++ 
++@@ -253,6 +279,8 @@ typedef struct
++ #define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
++ #define VARHDRSZ_COMPRESSED		offsetof(varattrib_4b, va_compressed.va_data)
++ #define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
+++#define VARHDRSZ_CUSTOM			offsetof(varattrib_1b_e, va_data)
+++
++ 
++ #define VARATT_SHORT_MAX		0x7F
++ #define VARATT_CAN_MAKE_SHORT(PTR) \
++@@ -282,7 +310,10 @@ typedef struct
++ #define VARDATA_SHORT(PTR)					VARDATA_1B(PTR)
++ 
++ #define VARTAG_EXTERNAL(PTR)				VARTAG_1B_E(PTR)
++-#define VARSIZE_EXTERNAL(PTR)				(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
+++#define VARSIZE_EXTERNAL(PTR)				(VARATT_IS_CUSTOM(PTR) ? \
+++											 VARSIZE_CUSTOM(PTR) : \
+++											 (VARHDRSZ_EXTERNAL + \
+++											  VARTAG_SIZE(VARTAG_EXTERNAL(PTR))))
++ #define VARDATA_EXTERNAL(PTR)				VARDATA_1B_E(PTR)
++ 
++ #define VARATT_IS_COMPRESSED(PTR)			VARATT_IS_4B_C(PTR)
++@@ -293,15 +324,51 @@ typedef struct
++ 	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_INDIRECT)
++ #define VARATT_IS_EXTERNAL_EXPANDED_RO(PTR) \
++ 	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_EXPANDED_RO)
+++#define VARATT_IS_CUSTOM(PTR) \
+++	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_CUSTOM)
++ #define VARATT_IS_EXTERNAL_EXPANDED_RW(PTR) \
++ 	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_EXPANDED_RW)
++ #define VARATT_IS_EXTERNAL_EXPANDED(PTR) \
++ 	(VARATT_IS_EXTERNAL(PTR) && VARTAG_IS_EXPANDED(VARTAG_EXTERNAL(PTR)))
++ #define VARATT_IS_EXTERNAL_NON_EXPANDED(PTR) \
++ 	(VARATT_IS_EXTERNAL(PTR) && !VARTAG_IS_EXPANDED(VARTAG_EXTERNAL(PTR)))
+++#define VARATT_IS_EXTERNAL_TOASTER(PTR) \
+++	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_CUSTOM)
++ #define VARATT_IS_SHORT(PTR)				VARATT_IS_1B(PTR)
++ #define VARATT_IS_EXTENDED(PTR)				(!VARATT_IS_4B_U(PTR))
++ 
+++
+++/* Custom Toast pointer */
+++#define VARATT_CUSTOM_GET_TOASTPOINTER(PTR) \
+++	((varatt_custom *) VARDATA_EXTERNAL(PTR))
+++
+++#define VARATT_CUSTOM_GET_TOASTERID(PTR) \
+++	(get_uint32align16(&VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_toasterid))
+++
+++#define VARATT_CUSTOM_SET_TOASTERID(PTR, V) \
+++	(set_uint32align16(&VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_toasterid, (V)))
+++
+++#define VARATT_CUSTOM_GET_DATA_RAW_SIZE(PTR) \
+++	(get_uint32align16(&VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_rawsize))
+++
+++#define VARATT_CUSTOM_SET_DATA_RAW_SIZE(PTR, V) \
+++	(set_uint32align16(&VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_rawsize, (V)))
+++
+++#define VARATT_CUSTOM_GET_DATA_SIZE(PTR) \
+++	((int32) VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_toasterdatalen)
+++
+++#define VARATT_CUSTOM_SET_DATA_SIZE(PTR, V) \
+++	(VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_toasterdatalen = (V))
+++
+++#define VARATT_CUSTOM_GET_DATA(PTR) \
+++	(VARATT_CUSTOM_GET_TOASTPOINTER(PTR)->va_toasterdata)
+++
+++#define VARATT_CUSTOM_SIZE(datalen) \
+++	((Size) VARHDRSZ_EXTERNAL + offsetof(varatt_custom, va_toasterdata) + (datalen))
+++
+++#define VARSIZE_CUSTOM(PTR)	VARATT_CUSTOM_SIZE(VARATT_CUSTOM_GET_DATA_SIZE(PTR))
+++
+++
++ #define SET_VARSIZE(PTR, len)				SET_VARSIZE_4B(PTR, len)
++ #define SET_VARSIZE_SHORT(PTR, len)			SET_VARSIZE_1B(PTR, len)
++ #define SET_VARSIZE_COMPRESSED(PTR, len)	SET_VARSIZE_4B_C(PTR, len)
++diff --git a/src/tools/pgindent/typedefs.list b/src/tools/pgindent/typedefs.list
++index 38620a5..49ace50 100644
++--- a/src/tools/pgindent/typedefs.list
+++++ b/src/tools/pgindent/typedefs.list
++@@ -899,6 +899,7 @@ FormData_pg_statistic_ext_data
++ FormData_pg_subscription
++ FormData_pg_subscription_rel
++ FormData_pg_tablespace
+++FormData_pg_toaster
++ FormData_pg_transform
++ FormData_pg_trigger
++ FormData_pg_ts_config
++@@ -958,6 +959,7 @@ Form_pg_statistic_ext_data
++ Form_pg_subscription
++ Form_pg_subscription_rel
++ Form_pg_tablespace
+++Form_pg_toaster
++ Form_pg_transform
++ Form_pg_trigger
++ Form_pg_ts_config
+diff --git a/contrib/Makefile b/contrib/Makefile
+index 2f0a88d..0b9a49c 100644
+--- a/contrib/Makefile
++++ b/contrib/Makefile
+@@ -18,6 +18,7 @@ SUBDIRS = \
+ 		dblink		\
+ 		dict_int	\
+ 		dict_xsyn	\
++		dummy_toaster	\
+ 		earthdistance	\
+ 		file_fdw	\
+ 		fuzzystrmatch	\
+diff --git a/contrib/dummy_toaster/Makefile b/contrib/dummy_toaster/Makefile
+new file mode 100644
+index 0000000..f60f672
+--- /dev/null
++++ b/contrib/dummy_toaster/Makefile
+@@ -0,0 +1,23 @@
++# contrib/dummy_toaster/Makefile
++
++MODULE_big = dummy_toaster
++OBJS = \
++	$(WIN32RES) \
++	dummy_toaster.o
++
++EXTENSION = dummy_toaster
++DATA = dummy_toaster--1.0.sql
++PGFILEDESC = "dummy_toaster - toaster example"
++
++REGRESS = dummy_toaster
++
++ifdef USE_PGXS
++PG_CONFIG = pg_config
++PGXS := $(shell $(PG_CONFIG) --pgxs)
++include $(PGXS)
++else
++subdir = contrib/dummy_toaster
++top_builddir = ../..
++include $(top_builddir)/src/Makefile.global
++include $(top_srcdir)/contrib/contrib-global.mk
++endif
+diff --git a/contrib/dummy_toaster/dummy_toaster--1.0.sql b/contrib/dummy_toaster/dummy_toaster--1.0.sql
+new file mode 100644
+index 0000000..e826c3d
+--- /dev/null
++++ b/contrib/dummy_toaster/dummy_toaster--1.0.sql
+@@ -0,0 +1,14 @@
++/* contrib/bloom/bloom--1.0.sql */
++
++-- complain if script is sourced in psql, rather than via CREATE EXTENSION
++\echo Use "CREATE EXTENSION dummy_toaster" to load this file. \quit
++
++CREATE FUNCTION dummy_toaster_handler(internal)
++RETURNS toaster_handler
++AS 'MODULE_PATHNAME'
++LANGUAGE C;
++
++
++CREATE TOASTER dummy_toaster  HANDLER dummy_toaster_handler;
++
++COMMENT ON TOASTER dummy_toaster IS 'dummy_toaster is a dummy toaster';
+diff --git a/contrib/dummy_toaster/dummy_toaster.c b/contrib/dummy_toaster/dummy_toaster.c
+new file mode 100644
+index 0000000..0d261f6
+--- /dev/null
++++ b/contrib/dummy_toaster/dummy_toaster.c
+@@ -0,0 +1,101 @@
++/*-------------------------------------------------------------------------
++ *
++ * dummy_toaster.c
++ *		Dummy toaster for Toaster API.
++ *
++ * Portions Copyright (c) 2016-2021, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1990-1993, Regents of the University of California
++ *
++ * IDENTIFICATION
++ *	  contrib/dummy_toaster/dummy_toaster.c
++ *
++ *-------------------------------------------------------------------------
++ */
++#include "postgres.h"
++#include "fmgr.h"
++#include "access/toasterapi.h"
++#include "nodes/makefuncs.h"
++
++PG_MODULE_MAGIC;
++PG_FUNCTION_INFO_V1(dummy_toaster_handler);
++
++#define MAX_DUMMY_CHUNK_SIZE 1024
++
++/*
++ * Dummy Toaster is a sample custom toaster for developers to show Toaster API
++ * functionality and correct way to add new Toasters to PgSQL.
++ */
++
++
++/*
++ * Dummy detoast function, does nothing
++ */
++static Datum
++dummy_detoast(Relation toast_rel, Datum toast_ptr,
++			 int offset, int length)
++{
++	struct varlena *result;
++	result = palloc(0);
++	return PointerGetDatum(result);
++}
++
++/*
++ * Dummy Toast function, does nothing
++ */
++static Datum
++dummy_toast(Relation toast_rel, Oid toasterid,
++		   Datum value, Datum oldvalue,
++		   int max_inline_size,  int options)
++{
++	struct varlena			*result;
++	result = palloc(0);
++	return PointerGetDatum(result);
++}
++
++/*
++ * Dummy deltoast function, does nothing
++ */
++static void
++dummy_delete(Datum value, bool is_speculative)
++{
++}
++
++/*
++ * Dummy init function, does nothing
++ */
++static void
++dummy_toast_init(Relation rel, Datum reloptions, LOCKMODE lockmode,
++				 bool check, Oid OIDOldToast)
++{
++}
++
++/*
++ * Dummy validation function, always returns TRUE
++ */
++static bool
++dummy_toaster_validate(Oid typeoid,  char storage, char compression,
++					 Oid amoid, bool false_ok)
++{
++	return true;
++}
++
++/*
++ * Dummy toaster handler.
++ * All Toaster functions declared in toasterapi.h and implemented in Custom
++ * Toasters must be assigned to TsrRoutine structure
++ */
++Datum
++dummy_toaster_handler(PG_FUNCTION_ARGS)
++{
++	TsrRoutine  *tsr = makeNode(TsrRoutine);
++	tsr->init = dummy_toast_init;
++	tsr->toast = dummy_toast;
++	tsr->update_toast = NULL;
++	tsr->copy_toast = NULL;
++	tsr->detoast = dummy_detoast;
++	tsr->deltoast = dummy_delete;
++	tsr->get_vtable = NULL;
++	tsr->toastervalidate = NULL;
++
++	PG_RETURN_POINTER(tsr);
++}
+diff --git a/contrib/dummy_toaster/dummy_toaster.control b/contrib/dummy_toaster/dummy_toaster.control
+new file mode 100644
+index 0000000..d13f1c8
+--- /dev/null
++++ b/contrib/dummy_toaster/dummy_toaster.control
+@@ -0,0 +1,5 @@
++# dummy_toaster extension
++comment = 'dummy_toaster - dummy toaster'
++default_version = '1.0'
++module_pathname = '$libdir/dummy_toaster'
++relocatable = true
+diff --git a/contrib/dummy_toaster/expected/dummy_toaster.out b/contrib/dummy_toaster/expected/dummy_toaster.out
+new file mode 100644
+index 0000000..8c919a2
+--- /dev/null
++++ b/contrib/dummy_toaster/expected/dummy_toaster.out
+@@ -0,0 +1,51 @@
++CREATE EXTENSION dummy_toaster;
++CREATE TABLE tst_failed (
++	t text TOASTER dummy_toaster TOASTER dummy_toaster
++);
++ERROR:  multiple TOASTER clauses not allowed
++CREATE TABLE tst1 (
++	t text TOASTER dummy_toaster
++);
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst1'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++ attnum | attname | atttypid | attstorage |    tsrname    
++--------+---------+----------+------------+---------------
++      1 | t       |       25 | x          | dummy_toaster
++(1 row)
++
++CREATE TABLE tst2 (
++	t	text
++);
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst2'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++ attnum | attname | atttypid | attstorage |  tsrname   
++--------+---------+----------+------------+------------
++      1 | t       |       25 | x          | deftoaster
++(1 row)
++
++ALTER TABLE tst2 ALTER COLUMN t SET TOASTER dummy_toaster;
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst2'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++ attnum | attname | atttypid | attstorage |    tsrname    
++--------+---------+----------+------------+---------------
++      1 | t       |       25 | x          | dummy_toaster
++(1 row)
++
++\d+ tst1
++                                          Table "public.tst1"
++ Column | Type | Collation | Nullable | Default | Storage  |    Toaster    | Stats target | Description 
++--------+------+-----------+----------+---------+----------+---------------+--------------+-------------
++ t      | text |           |          |         | extended | dummy_toaster |              | 
++
++\d+ tst2
++                                          Table "public.tst2"
++ Column | Type | Collation | Nullable | Default | Storage  |    Toaster    | Stats target | Description 
++--------+------+-----------+----------+---------+----------+---------------+--------------+-------------
++ t      | text |           |          |         | extended | dummy_toaster |              | 
++
+diff --git a/contrib/dummy_toaster/sql/dummy_toaster.sql b/contrib/dummy_toaster/sql/dummy_toaster.sql
+new file mode 100644
+index 0000000..3b1cb61
+--- /dev/null
++++ b/contrib/dummy_toaster/sql/dummy_toaster.sql
+@@ -0,0 +1,33 @@
++CREATE EXTENSION dummy_toaster;
++
++CREATE TABLE tst_failed (
++	t text TOASTER dummy_toaster TOASTER dummy_toaster
++);
++
++CREATE TABLE tst1 (
++	t text TOASTER dummy_toaster
++);
++
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst1'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++
++CREATE TABLE tst2 (
++	t	text
++);
++
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst2'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++
++ALTER TABLE tst2 ALTER COLUMN t SET TOASTER dummy_toaster;
++
++SELECT attnum, attname, atttypid, attstorage, tsrname
++	FROM pg_attribute, pg_toaster t
++	WHERE attrelid = 'tst2'::regclass and attnum>0 and t.oid = atttoaster
++	ORDER BY attnum;
++
++\d+ tst1
++\d+ tst2
+diff --git a/src/backend/access/common/tupdesc.c b/src/backend/access/common/tupdesc.c
+index 020d00c..2ef1bb1 100644
+--- a/src/backend/access/common/tupdesc.c
++++ b/src/backend/access/common/tupdesc.c
+@@ -25,11 +25,13 @@
+ #include "catalog/catalog.h"
+ #include "catalog/pg_collation.h"
+ #include "catalog/pg_type.h"
++#include "catalog/pg_toaster.h"
+ #include "common/hashfn.h"
+ #include "utils/builtins.h"
+ #include "utils/datum.h"
+ #include "utils/resowner.h"
+ #include "utils/syscache.h"
++#include "utils/lsyscache.h"
+ 
+ /* ResourceOwner callbacks to hold tupledesc references  */
+ static void ResOwnerReleaseTupleDesc(Datum res);
+@@ -632,6 +634,8 @@ equalTupleDescs(TupleDesc tupdesc1, TupleDesc tupdesc2)
+ 			return false;
+ 		if (attr1->attstorage != attr2->attstorage)
+ 			return false;
++		if (attr1->atttoaster != attr2->atttoaster)
++			return false;
+ 		if (attr1->attcompression != attr2->attcompression)
+ 			return false;
+ 		if (attr1->attnotnull != attr2->attnotnull)
+@@ -901,6 +905,8 @@ TupleDescInitEntry(TupleDesc desc,
+ 	att->attbyval = typeForm->typbyval;
+ 	att->attalign = typeForm->typalign;
+ 	att->attstorage = typeForm->typstorage;
++	att->atttoaster = TypeIsToastable(oidtypeid) ?
++		DEFAULT_TOASTER_OID : InvalidOid;
+ 	att->attcompression = InvalidCompressionMethod;
+ 	att->attcollation = typeForm->typcollation;
+ 
+@@ -969,6 +975,7 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
+ 			att->attbyval = false;
+ 			att->attalign = TYPALIGN_INT;
+ 			att->attstorage = TYPSTORAGE_EXTENDED;
++			att->atttoaster = DEFAULT_TOASTER_OID;
+ 			att->attcompression = InvalidCompressionMethod;
+ 			att->attcollation = DEFAULT_COLLATION_OID;
+ 			break;
+@@ -978,6 +985,7 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
+ 			att->attbyval = true;
+ 			att->attalign = TYPALIGN_CHAR;
+ 			att->attstorage = TYPSTORAGE_PLAIN;
++						att->atttoaster = DEFAULT_TOASTER_OID;
+ 			att->attcompression = InvalidCompressionMethod;
+ 			att->attcollation = InvalidOid;
+ 			break;
+@@ -987,6 +995,7 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
+ 			att->attbyval = true;
+ 			att->attalign = TYPALIGN_INT;
+ 			att->attstorage = TYPSTORAGE_PLAIN;
++			att->atttoaster = DEFAULT_TOASTER_OID;
+ 			att->attcompression = InvalidCompressionMethod;
+ 			att->attcollation = InvalidOid;
+ 			break;
 diff --git a/src/backend/access/index/Makefile b/src/backend/access/index/Makefile
 index 6f2e306..12301a4 100644
 --- a/src/backend/access/index/Makefile
@@ -443,6 +2381,47 @@ index df3231f..2fba626 100644
  
  	# set attndims if it's an array type
  	$row->{attndims} = $type->{typcategory} eq 'A' ? '1' : '0';
+diff --git a/src/backend/catalog/heap.c b/src/backend/catalog/heap.c
+index 931010e..6f29175 100644
+--- a/src/backend/catalog/heap.c
++++ b/src/backend/catalog/heap.c
+@@ -760,6 +760,7 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(attrs->attbyval);
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_attalign - 1] = CharGetDatum(attrs->attalign);
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(attrs->attstorage);
++		slot[slotCount]->tts_values[Anum_pg_attribute_atttoaster - 1] = ObjectIdGetDatum(attrs->atttoaster);
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_attcompression - 1] = CharGetDatum(attrs->attcompression);
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_attnotnull - 1] = BoolGetDatum(attrs->attnotnull);
+ 		slot[slotCount]->tts_values[Anum_pg_attribute_atthasdef - 1] = BoolGetDatum(attrs->atthasdef);
+diff --git a/src/backend/catalog/index.c b/src/backend/catalog/index.c
+index aa21668..5b5b208 100644
+--- a/src/backend/catalog/index.c
++++ b/src/backend/catalog/index.c
+@@ -48,6 +48,7 @@
+ #include "catalog/pg_opclass.h"
+ #include "catalog/pg_operator.h"
+ #include "catalog/pg_tablespace.h"
++#include "catalog/pg_toaster.h"
+ #include "catalog/pg_trigger.h"
+ #include "catalog/pg_type.h"
+ #include "catalog/storage.h"
+@@ -357,6 +358,7 @@ ConstructTupleDescriptor(Relation heapRelation,
+ 			to->attalign = from->attalign;
+ 			to->attstorage = from->attstorage;
+ 			to->attcompression = from->attcompression;
++			to->atttoaster = from->atttoaster;
+ 		}
+ 		else
+ 		{
+@@ -395,6 +397,8 @@ ConstructTupleDescriptor(Relation heapRelation,
+ 			 * time.
+ 			 */
+ 			to->attcompression = InvalidCompressionMethod;
++			to->atttoaster = (TypeIsToastable(keyType)) ?
++				DEFAULT_TOASTER_OID : InvalidOid;
+ 
+ 			ReleaseSysCache(tuple);
+ 
 diff --git a/src/backend/catalog/meson.build b/src/backend/catalog/meson.build
 index 1958ea9..7dbfa55 100644
 --- a/src/backend/catalog/meson.build
@@ -456,7 +2435,7 @@ index 1958ea9..7dbfa55 100644
    'storage.c',
    'toasting.c',
 diff --git a/src/backend/catalog/objectaddress.c b/src/backend/catalog/objectaddress.c
-index b63fd57..efc9274 100644
+index b63fd57..02c8b0d 100644
 --- a/src/backend/catalog/objectaddress.c
 +++ b/src/backend/catalog/objectaddress.c
 @@ -54,6 +54,7 @@
@@ -521,7 +2500,7 @@ index b63fd57..efc9274 100644
  				break;
  			}
  
-+		case OCLASS_TOASTER:
++		case ToasterRelationId:
 +			{
 +				HeapTuple	tup;
 +
@@ -548,7 +2527,7 @@ index b63fd57..efc9274 100644
  			appendStringInfoString(&buffer, "transform");
  			break;
  
-+		case OCLASS_TOASTER:
++		case ToasterRelationId:
 +			appendStringInfoString(&buffer, "toaster");
 +			break;
 +
@@ -560,7 +2539,7 @@ index b63fd57..efc9274 100644
  			}
  			break;
  
-+		case OCLASS_TOASTER:
++		case ToasterRelationId:
 +			{
 +				char	   *tsrname;
 +
@@ -702,6 +2681,238 @@ index cee5d7b..2f49a79 100644
  		case OBJECT_TRANSFORM:
  		case OBJECT_TRIGGER:
  		case OBJECT_TSCONFIGURATION:
+diff --git a/src/backend/commands/sequence.c b/src/backend/commands/sequence.c
+index a79ef06..b8a12ca 100644
+--- a/src/backend/commands/sequence.c
++++ b/src/backend/commands/sequence.c
+@@ -192,6 +192,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
+ 		}
+ 
+ 		coldef->is_not_null = true;
++		coldef->toaster = NULL; 
+ 		null[i - 1] = false;
+ 
+ 		stmt->tableElts = lappend(stmt->tableElts, coldef);
+diff --git a/src/backend/commands/tablecmds.c b/src/backend/commands/tablecmds.c
+index dd2b4a5..1294c72 100644
+--- a/src/backend/commands/tablecmds.c
++++ b/src/backend/commands/tablecmds.c
+@@ -6722,7 +6722,9 @@ alter_table_type_to_string(AlterTableType cmdtype)
+ 		case AT_DropIdentity:
+ 			return "ALTER COLUMN ... DROP IDENTITY";
+ 		case AT_ReAddStatistics:
+-			return NULL;		/* not real grammar */
++			return NULL;		
++		case AT_SetToaster:
++			return "ALTER COLUMN ... SET TOASTER";/* not real grammar */
+ 	}
+ 
+ 	return NULL;
+diff --git a/src/backend/commands/toastercmds.c b/src/backend/commands/toastercmds.c
+new file mode 100644
+index 0000000..e1241f5
+--- /dev/null
++++ b/src/backend/commands/toastercmds.c
+@@ -0,0 +1,199 @@
++/*-------------------------------------------------------------------------
++ *
++ * toastercmds.c
++ *	  Routines for SQL commands that manipulate toasters.
++ *
++ * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1994, Regents of the University of California
++ *
++ *
++ * IDENTIFICATION
++ *	  src/backend/commands/toastercmds.c
++ *-------------------------------------------------------------------------
++ */
++#include "postgres.h"
++
++#include "access/htup_details.h"
++#include "access/table.h"
++#include "catalog/catalog.h"
++#include "catalog/dependency.h"
++#include "catalog/indexing.h"
++#include "catalog/objectaccess.h"
++#include "catalog/pg_proc.h"
++#include "catalog/pg_toaster.h"
++#include "catalog/pg_type.h"
++#include "commands/defrem.h"
++#include "miscadmin.h"
++#include "parser/parse_func.h"
++#include "utils/builtins.h"
++#include "utils/lsyscache.h"
++#include "utils/rel.h"
++#include "utils/syscache.h"
++
++
++static Oid	lookup_toaster_handler_func(List *handler_name);
++
++/*
++ * CreateToaster
++ *		Registers a new toaster.
++ */
++ObjectAddress
++CreateToaster(CreateToasterStmt *stmt)
++{
++	Relation	rel;
++	ObjectAddress myself;
++	ObjectAddress referenced;
++	Oid			tsroid;
++	Oid			tsrhandler;
++	bool		nulls[Natts_pg_toaster];
++	Datum		values[Natts_pg_toaster];
++	HeapTuple	tup;
++
++	rel = table_open(ToasterRelationId, RowExclusiveLock);
++
++	/* Must be superuser */
++	if (!superuser())
++		ereport(ERROR,
++				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
++				 errmsg("permission denied to create toaster \"%s\"",
++						stmt->tsrname),
++				 errhint("Must be superuser to create an toaster.")));
++
++	/* Check if name is used */
++	tsroid = GetSysCacheOid1(TOASTERNAME, Anum_pg_toaster_oid,
++							CStringGetDatum(stmt->tsrname));
++	if (OidIsValid(tsroid))
++	{
++		if (stmt->if_not_exists)
++		{
++			ereport(NOTICE,
++					(errcode(ERRCODE_DUPLICATE_OBJECT),
++					 errmsg("toaster \"%s\" already exists, skipping",
++							stmt->tsrname)));
++
++			table_close(rel, RowExclusiveLock);
++			return InvalidObjectAddress;
++		}
++		else
++			ereport(ERROR,
++					(errcode(ERRCODE_DUPLICATE_OBJECT),
++					 errmsg("toaster \"%s\" already exists",
++							stmt->tsrname)));
++	}
++
++	/*
++	 * Get the handler function oid, verifying the toaster type while at it.
++	 */
++	tsrhandler = lookup_toaster_handler_func(stmt->handler_name);
++
++	/*
++	 * Insert tuple into pg_toaster.
++	 */
++	memset(values, 0, sizeof(values));
++	memset(nulls, false, sizeof(nulls));
++
++	tsroid = GetNewOidWithIndex(rel, ToasterOidIndexId, Anum_pg_toaster_oid);
++	values[Anum_pg_toaster_oid - 1] = ObjectIdGetDatum(tsroid);
++	values[Anum_pg_toaster_tsrname - 1] =
++		DirectFunctionCall1(namein, CStringGetDatum(stmt->tsrname));
++	values[Anum_pg_toaster_tsrhandler - 1] = ObjectIdGetDatum(tsrhandler);
++
++	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
++
++	CatalogTupleInsert(rel, tup);
++	heap_freetuple(tup);
++
++	myself.classId = ToasterRelationId;
++	myself.objectId = tsroid;
++	myself.objectSubId = 0;
++
++	/* Record dependency on handler function */
++	referenced.classId = ProcedureRelationId;
++	referenced.objectId = tsrhandler;
++	referenced.objectSubId = 0;
++
++	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
++
++	recordDependencyOnCurrentExtension(&myself, false);
++
++	InvokeObjectPostCreateHook(ToasterRelationId, tsroid, 0);
++
++	table_close(rel, RowExclusiveLock);
++
++	return myself;
++}
++
++/*
++ * get_toaster_oid - given an toaster name, look up its OID
++ */
++Oid
++get_toaster_oid(const char *tsrname, bool missing_ok)
++{
++	HeapTuple	tup;
++	Oid			oid = InvalidOid;
++
++	tup = SearchSysCache1(TOASTERNAME, CStringGetDatum(tsrname));
++	if (HeapTupleIsValid(tup))
++	{
++		Form_pg_toaster	tsrform = (Form_pg_toaster) GETSTRUCT(tup);
++
++		oid = tsrform->oid;
++		ReleaseSysCache(tup);
++	}
++
++	if (!OidIsValid(oid) && !missing_ok)
++		ereport(ERROR,
++				(errcode(ERRCODE_UNDEFINED_OBJECT),
++				 errmsg("toaster \"%s\" does not exist", tsrname)));
++	return oid;
++}
++
++/*
++ * get_toaster_name - given an toaster OID, look up its name.
++ */
++char *
++get_toaster_name(Oid tsroid)
++{
++	HeapTuple	tup;
++	char	   *result = NULL;
++
++	tup = SearchSysCache1(TOASTEROID, ObjectIdGetDatum(tsroid));
++	if (HeapTupleIsValid(tup))
++	{
++		Form_pg_toaster	tsrform = (Form_pg_toaster) GETSTRUCT(tup);
++
++		result = pstrdup(NameStr(tsrform->tsrname));
++		ReleaseSysCache(tup);
++	}
++	return result;
++}
++
++/*
++ * Convert a handler function name to an Oid.  If the return type of the
++ * function doesn't match the given toaster type, an error is raised.
++ *
++ * This function either return valid function Oid or throw an error.
++ */
++static Oid
++lookup_toaster_handler_func(List *handler_name)
++{
++	Oid			handlerOid;
++	Oid			funcargtypes[1] = {INTERNALOID};
++
++	if (handler_name == NIL)
++		ereport(ERROR,
++				(errcode(ERRCODE_UNDEFINED_FUNCTION),
++				 errmsg("handler function is not specified")));
++
++	/* handlers have one argument of type internal */
++	handlerOid = LookupFuncName(handler_name, 1, funcargtypes, false);
++
++	if (get_func_rettype(handlerOid) != TOASTER_HANDLEROID)
++		ereport(ERROR,
++				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
++				 errmsg("function %s must return type %s",
++						get_func_name(handlerOid),
++						format_type_extended(TOASTER_HANDLEROID, -1, 0))));
++
++	return handlerOid;
++}
 diff --git a/src/backend/nodes/Makefile b/src/backend/nodes/Makefile
 index 77ddb9c..b11d266 100644
 --- a/src/backend/nodes/Makefile
@@ -715,7 +2926,7 @@ index 77ddb9c..b11d266 100644
  	commands/trigger.h \
  	executor/tuptable.h \
 diff --git a/src/backend/nodes/gen_node_support.pl b/src/backend/nodes/gen_node_support.pl
-index 214d2c7..b154923 100644
+index 214d2c7..f22ca1e 100644
 --- a/src/backend/nodes/gen_node_support.pl
 +++ b/src/backend/nodes/gen_node_support.pl
 @@ -62,6 +62,7 @@ my @all_input_files = qw(
@@ -730,7 +2941,7 @@ index 214d2c7..b154923 100644
    access/sdir.h
    access/tableam.h
    access/tsmapi.h
-+  access/toasterapi.h
++  access/toasterapi.h \
    commands/event_trigger.h
    commands/trigger.h
    executor/tuptable.h
@@ -739,12 +2950,24 @@ index 214d2c7..b154923 100644
  
  my $last_nodetag = 'WindowObjectData';
 -my $last_nodetag_no = 479;
-+my $last_nodetag_no = 483;
++my $last_nodetag_no = 481;
  
  # output file names
  my @output_files;
+diff --git a/src/backend/nodes/makefuncs.c b/src/backend/nodes/makefuncs.c
+index e2d9e9b..7ea5618 100644
+--- a/src/backend/nodes/makefuncs.c
++++ b/src/backend/nodes/makefuncs.c
+@@ -575,6 +575,7 @@ makeColumnDef(const char *colname, Oid typeOid, int32 typmod, Oid collOid)
+ 	n->storage = 0;
+ 	n->raw_default = NULL;
+ 	n->cooked_default = NULL;
++	n->toaster = NULL;
+ 	n->collClause = NULL;
+ 	n->collOid = collOid;
+ 	n->constraints = NIL;
 diff --git a/src/backend/parser/gram.y b/src/backend/parser/gram.y
-index 03c80ea..8461ffa 100644
+index 03c80ea..26cdb6a 100644
 --- a/src/backend/parser/gram.y
 +++ b/src/backend/parser/gram.y
 @@ -195,6 +195,7 @@ static RangeVar *makeRangeVarFromQualifiedName(char *name, List *namelist, int l
@@ -955,7 +3178,7 @@ index 03c80ea..8461ffa 100644
  		}
 +		else if (IsA(n, String))
 +		{
-+			String	*toaster_val = (String*) n;
++			String	*toaster_val = (String *) n;
 +
 +			if (toaster_name == NULL)
 +				ereport(ERROR,
@@ -966,12 +3189,33 @@ index 03c80ea..8461ffa 100644
 +				ereport(ERROR,
 +						(errcode(ERRCODE_SYNTAX_ERROR),
 +						 errmsg("multiple TOASTER clauses not allowed")));
-+			
++
 +			*toaster_name = strVal(toaster_val);
 +		}
  		else
  			elog(ERROR, "unexpected node type %d", (int) n->type);
  		/* remove non-Constraint nodes from qualList */
+diff --git a/src/backend/parser/parse_utilcmd.c b/src/backend/parser/parse_utilcmd.c
+index 1d6864f..21b8975 100644
+--- a/src/backend/parser/parse_utilcmd.c
++++ b/src/backend/parser/parse_utilcmd.c
+@@ -1197,6 +1197,8 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
+ 		 */
+ 		def = makeColumnDef(NameStr(attribute->attname), attribute->atttypid,
+ 							attribute->atttypmod, attribute->attcollation);
++		
++		def->toaster = NULL;
+ 
+ 		/*
+ 		 * Add to column list
+@@ -1662,6 +1664,7 @@ transformOfType(CreateStmtContext *cxt, TypeName *ofTypename)
+ 		n = makeColumnDef(NameStr(attr->attname), attr->atttypid,
+ 						  attr->atttypmod, attr->attcollation);
+ 		n->is_from_type = true;
++		n->toaster = NULL;
+ 
+ 		cxt->columns = lappend(cxt->columns, n);
+ 	}
 diff --git a/src/backend/tcop/utility.c b/src/backend/tcop/utility.c
 index 4b8d877..65140fd 100644
 --- a/src/backend/tcop/utility.c
@@ -1043,6 +3287,718 @@ index f944453..3114000 100644
  
  /*---------------------------------------------------------------------------
  
+diff --git a/src/bin/pg_dump/common.c b/src/bin/pg_dump/common.c
+index a1976fa..0b327bf 100644
+--- a/src/bin/pg_dump/common.c
++++ b/src/bin/pg_dump/common.c
+@@ -25,6 +25,7 @@
+ #include "catalog/pg_operator_d.h"
+ #include "catalog/pg_proc_d.h"
+ #include "catalog/pg_publication_d.h"
++#include "catalog/pg_toaster_d.h"
+ #include "catalog/pg_subscription_d.h"
+ #include "catalog/pg_type_d.h"
+ #include "common/hashfn.h"
+@@ -176,6 +177,9 @@ getSchemaData(Archive *fout, int *numTablesPtr)
+ 	pg_log_info("reading default privileges");
+ 	getDefaultACLs(fout);
+ 
++	pg_log_info("reading user-defined toasters");
++	getToasters(fout);
++
+ 	pg_log_info("reading user-defined collations");
+ 	getCollations(fout);
+ 
+@@ -981,6 +985,26 @@ findCollationByOid(Oid oid)
+ 	return (CollInfo *) dobj;
+ }
+ 
++
++/*
++ * findToasterByOid
++ *	  finds the DumpableObject for the toaster with the given oid
++ *	  returns NULL if not found
++ */
++ToasterInfo *
++findToasterByOid(Oid oid)
++{
++	CatalogId	catId;
++	DumpableObject *dobj;
++
++	catId.tableoid = ToasterRelationId;
++	catId.oid = oid;
++	dobj = findObjectByCatalogId(catId);
++	Assert(dobj == NULL || dobj->objType == DO_TOASTER);
++	return (ToasterInfo *) dobj;
++}
++
++
+ /*
+  * findNamespaceByOid
+  *	  finds the DumpableObject for the namespace with the given oid
+diff --git a/src/bin/pg_dump/pg_dump.c b/src/bin/pg_dump/pg_dump.c
+index 583afc6..7770b78 100644
+--- a/src/bin/pg_dump/pg_dump.c
++++ b/src/bin/pg_dump/pg_dump.c
+@@ -53,6 +53,7 @@
+ #include "catalog/pg_proc_d.h"
+ #include "catalog/pg_publication_d.h"
+ #include "catalog/pg_subscription_d.h"
++#include "catalog/pg_toaster_d.h"
+ #include "catalog/pg_type_d.h"
+ #include "common/connect.h"
+ #include "common/int.h"
+@@ -373,6 +374,7 @@ static void dumpPolicy(Archive *fout, const PolicyInfo *polinfo);
+ static void dumpPublication(Archive *fout, const PublicationInfo *pubinfo);
+ static void dumpPublicationTable(Archive *fout, const PublicationRelInfo *pubrinfo);
+ static void dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo);
++static void dumpToaster(Archive *fout, const ToasterInfo *tsrinfo);
+ static void dumpSubscriptionTable(Archive *fout, const SubRelInfo *subrinfo);
+ static void dumpDatabase(Archive *fout);
+ static void dumpDatabaseConfig(Archive *AH, PQExpBuffer outbuf,
+@@ -2186,7 +2188,7 @@ selectDumpableProcLang(ProcLangInfo *plang, Archive *fout)
+  * selectDumpableAccessMethod: policy-setting subroutine
+  *		Mark an access method as to be dumped or not
+  *
+- * Access methods do not belong to any particular namespace.  To identify
++ * Access methods do not belong to any paselectDumpableAccessMethodrticular namespace.  To identify
+  * built-in access methods, we must resort to checking whether the
+  * method's OID is in the range reserved for initdb.
+  */
+@@ -2214,6 +2216,33 @@ selectDumpableAccessMethod(AccessMethodInfo *method, Archive *fout)
+ 			DUMP_COMPONENT_ALL : DUMP_COMPONENT_NONE;
+ }
+ 
++
++/*
++ * selectDumpableToaster: policy-setting subroutine
++ *		Mark an toaster as to be dumped or not
++ *
++ * Toaster do not belong to any particular namespace.  To identify
++ * built-in toasters, we must resort to checking whether the
++ * method's OID is in the range reserved for initdb.
++ */
++static void
++selectDumpableToaster(ToasterInfo *method, Archive *fout)
++{
++	if (checkExtensionMembership(&method->dobj, fout))
++		return;					/* extension membership overrides all else */
++
++	/*
++	 * This would be DUMP_COMPONENT_ACL for from-initdb toaster, but
++	 * they do not support ACLs currently.
++	 */
++	if (method->dobj.catId.oid <= (Oid) g_last_builtin_oid)
++		method->dobj.dump = DUMP_COMPONENT_NONE;
++	else
++		method->dobj.dump = fout->dopt->include_everything ?
++			DUMP_COMPONENT_ALL : DUMP_COMPONENT_NONE;
++}
++
++
+ /*
+  * selectDumpableExtension: policy-setting subroutine
+  *		Mark an extension as to be dumped or not
+@@ -5469,6 +5498,61 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
+ 	free(qsubname);
+ }
+ 
++
++/*
++ * dumpToaster
++ *	  write out a single toaster definition
++ */
++static void
++dumpToaster(Archive *fout, const ToasterInfo *tsrinfo)
++{
++	DumpOptions *dopt = fout->dopt;
++	PQExpBuffer q;
++	PQExpBuffer delq;
++	char	   *qtsrname;
++
++	/* Do nothing in data-only dump */
++	if (dopt->dumpSchema)
++		return;
++
++	q = createPQExpBuffer();
++	delq = createPQExpBuffer();
++
++	qtsrname = pg_strdup(fmtId(tsrinfo->dobj.name));
++
++	appendPQExpBuffer(q, "CREATE TOASTER %s ", qtsrname);
++
++	appendPQExpBuffer(q, "HANDLER %s;\n", tsrinfo->tsrhandler);
++
++	/*
++	 * Toaster could not be dropped
++	 * appendPQExpBuffer(delq, "DROP TOASTER %s;\n",
++	 *				  qtsrname);
++	 */
++	if (dopt->binary_upgrade)
++		binary_upgrade_extension_member(q, &tsrinfo->dobj,
++										"TOASTER", qtsrname, NULL);
++
++	if (tsrinfo->dobj.dump & DUMP_COMPONENT_DEFINITION)
++		ArchiveEntry(fout, tsrinfo->dobj.catId, tsrinfo->dobj.dumpId,
++					 ARCHIVE_OPTS(.tag = tsrinfo->dobj.name,
++								  .description = "TOASTER",
++								  .section = SECTION_PRE_DATA,
++								  .createStmt = q->data,
++								  .dropStmt = delq->data));
++
++	/* Dump Access Method Comments */
++	if (tsrinfo->dobj.dump & DUMP_COMPONENT_COMMENT)
++		dumpComment(fout, "TOASTER", qtsrname,
++					NULL, "",
++					tsrinfo->dobj.catId, 0, tsrinfo->dobj.dumpId);
++
++	destroyPQExpBuffer(q);
++	destroyPQExpBuffer(delq);
++	free(qtsrname);
++}
++
++
+ /*
+  * Given a "create query", append as many ALTER ... DEPENDS ON EXTENSION as
+  * the object needs.
+@@ -9088,6 +9172,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
+ 	int			i_atttypname;
+ 	int			i_attstattarget;
+ 	int			i_attstorage;
++	int			i_atttoaster;
+ 	int			i_typstorage;
+ 	int			i_attidentity;
+ 	int			i_attgenerated;
+@@ -9161,6 +9246,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
+ 						 "a.attname,\n"
+ 						 "a.attstattarget,\n"
+ 						 "a.attstorage,\n"
++						"a.atttoaster,\n"
+ 						 "t.typstorage,\n"
+ 						 "a.atthasdef,\n"
+ 						 "a.attisdropped,\n"
+@@ -9280,6 +9366,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
+ 	i_atttypname = PQfnumber(res, "atttypname");
+ 	i_attstattarget = PQfnumber(res, "attstattarget");
+ 	i_attstorage = PQfnumber(res, "attstorage");
++	i_atttoaster = PQfnumber(res, "atttoaster");
+ 	i_typstorage = PQfnumber(res, "typstorage");
+ 	i_attidentity = PQfnumber(res, "attidentity");
+ 	i_attgenerated = PQfnumber(res, "attgenerated");
+@@ -9344,6 +9431,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
+ 		tbinfo->atttypnames = (char **) pg_malloc(numatts * sizeof(char *));
+ 		tbinfo->attstattarget = (int *) pg_malloc(numatts * sizeof(int));
+ 		tbinfo->attstorage = (char *) pg_malloc(numatts * sizeof(char));
++		tbinfo->atttoaster = (Oid *) pg_malloc(numatts * sizeof(Oid));
+ 		tbinfo->typstorage = (char *) pg_malloc(numatts * sizeof(char));
+ 		tbinfo->attidentity = (char *) pg_malloc(numatts * sizeof(char));
+ 		tbinfo->attgenerated = (char *) pg_malloc(numatts * sizeof(char));
+@@ -9376,6 +9464,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
+ 			else
+ 				tbinfo->attstattarget[j] = atoi(PQgetvalue(res, r, i_attstattarget));
+ 			tbinfo->attstorage[j] = *(PQgetvalue(res, r, i_attstorage));
++			tbinfo->atttoaster[j] = atooid(PQgetvalue(res, r, i_atttoaster));
+ 			tbinfo->typstorage[j] = *(PQgetvalue(res, r, i_typstorage));
+ 			tbinfo->attidentity[j] = *(PQgetvalue(res, r, i_attidentity));
+ 			tbinfo->attgenerated[j] = *(PQgetvalue(res, r, i_attgenerated));
+@@ -10679,6 +10768,74 @@ getAdditionalACLs(Archive *fout)
+ 	destroyPQExpBuffer(query);
+ }
+ 
++
++/*
++ * getToasters:
++ *	  read all user-defined toasters in the system catalogs and return
++ *	  them in the ToasterInfo* structure
++ *
++ *	numAccessMethods is set to the number of access methods read in
++ */
++ToasterInfo *
++getToasters(Archive *fout, int *numToasters)
++{
++	PGresult   *res;
++	int			ntups;
++	int			i;
++	PQExpBuffer query;
++	ToasterInfo *tsrinfo;
++	int			i_tableoid;
++	int			i_oid;
++	int			i_tsrname;
++	int			i_tsrhandler;
++
++	/* Before 9.6, there are no user-defined access methods */
++	if (fout->remoteVersion < 150000)
++	{
++		*numToasters = 0;
++		return NULL;
++	}
++
++	query = createPQExpBuffer();
++
++	/* Select all toasters from pg_toaster table */
++	appendPQExpBufferStr(query, "SELECT tableoid, oid, tsrname, "
++						 "tsrhandler::pg_catalog.regproc AS tsrhandler "
++						 "FROM pg_toaster");
++
++	res = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
++
++	ntups = PQntuples(res);
++	*numToasters = ntups;
++
++	tsrinfo = (ToasterInfo *) pg_malloc(ntups * sizeof(ToasterInfo));
++
++	i_tableoid = PQfnumber(res, "tableoid");
++	i_oid = PQfnumber(res, "oid");
++	i_tsrname = PQfnumber(res, "tsrname");
++	i_tsrhandler = PQfnumber(res, "tsrhandler");
++
++	for (i = 0; i < ntups; i++)
++	{
++		tsrinfo[i].dobj.objType = DO_TOASTER;
++		tsrinfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
++		tsrinfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
++		AssignDumpId(&tsrinfo[i].dobj);
++		tsrinfo[i].dobj.name = pg_strdup(PQgetvalue(res, i, i_tsrname));
++		tsrinfo[i].dobj.namespace = NULL;
++		tsrinfo[i].tsrhandler = pg_strdup(PQgetvalue(res, i, i_tsrhandler));
++
++		/* Decide whether we want to dump it */
++		selectDumpableToaster(&(tsrinfo[i]), fout);
++	}
++
++	PQclear(res);
++
++	destroyPQExpBuffer(query);
++
++	return tsrinfo;
++}
++
+ /*
+  * dumpCommentExtended --
+  *
+@@ -11662,6 +11819,9 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
+ 		case DO_SUBSCRIPTION:
+ 			dumpSubscription(fout, (const SubscriptionInfo *) dobj);
+ 			break;
++		case DO_TOASTER:
++			dumpToaster(fout, (const ToasterInfo *) dobj);
++			break;
+ 		case DO_SUBSCRIPTION_REL:
+ 			dumpSubscriptionTable(fout, (const SubRelInfo *) dobj);
+ 			break;
+@@ -17717,6 +17877,19 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
+ 									  storage);
+ 			}
+ 
++			/* check toastability of type, not column! */
++			if (tbinfo->typstorage[j] != TYPSTORAGE_PLAIN &&
++				tbinfo->atttoaster[j] != DEFAULT_TOASTER_OID)
++			{
++				ToasterInfo   *tsr;
++
++				tsr = findToasterByOid(tbinfo->atttoaster[j]);
++				if (tsr)
++					appendPQExpBuffer(q, "ALTER TABLE %s ALTER COLUMN %s SET TOASTER %s;\n",
++									  qualrelname,
++									  fmtId(tbinfo->attnames[j]),
++									  tsr->dobj.name);
++			}
+ 			/*
+ 			 * Dump per-column compression, if it's been set.
+ 			 */
+@@ -20016,6 +20189,7 @@ addBoundaryDependencies(DumpableObject **dobjs, int numObjs,
+ 			case DO_FDW:
+ 			case DO_FOREIGN_SERVER:
+ 			case DO_TRANSFORM:
++			case DO_TOASTER:
+ 				/* Pre-data objects: must come before the pre-data boundary */
+ 				addObjectDependency(preDataBound, dobj->dumpId);
+ 				break;
+diff --git a/src/bin/pg_dump/pg_dump.h b/src/bin/pg_dump/pg_dump.h
+index 30121af..881a0ce 100644
+--- a/src/bin/pg_dump/pg_dump.h
++++ b/src/bin/pg_dump/pg_dump.h
+@@ -50,6 +50,7 @@ typedef enum
+ 	DO_OPFAMILY,
+ 	DO_COLLATION,
+ 	DO_CONVERSION,
++	DO_TOASTER,
+ 	DO_TABLE,
+ 	DO_TABLE_ATTACH,
+ 	DO_ATTRDEF,
+@@ -356,6 +357,7 @@ typedef struct _tableInfo
+ 	char	  **atttypnames;	/* attribute type names */
+ 	int		   *attstattarget;	/* attribute statistics targets */
+ 	char	   *attstorage;		/* attribute storage scheme */
++	Oid		   *atttoaster;		/* attribute toaster */
+ 	char	   *typstorage;		/* type storage scheme */
+ 	bool	   *attisdropped;	/* true if attr is dropped; don't dump it */
+ 	char	   *attidentity;
+@@ -724,6 +726,16 @@ typedef struct _SubscriptionInfo
+ 	char	   *suboriginremotelsn;
+ } SubscriptionInfo;
+ 
++
++/*
++ * The ToasterInfo struct is used to represent toaster
++ */
++typedef struct _ToasterInfo
++{
++	DumpableObject dobj;
++	char	   *tsrhandler;
++} ToasterInfo;
++
+ /*
+  * The SubRelInfo struct is used to represent a subscription relation.
+  *
+@@ -766,6 +778,7 @@ extern FuncInfo *findFuncByOid(Oid oid);
+ extern OprInfo *findOprByOid(Oid oid);
+ extern AccessMethodInfo *findAccessMethodByOid(Oid oid);
+ extern CollInfo *findCollationByOid(Oid oid);
++extern ToasterInfo *findToasterByOid(Oid oid);
+ extern NamespaceInfo *findNamespaceByOid(Oid oid);
+ extern ExtensionInfo *findExtensionByOid(Oid oid);
+ extern PublicationInfo *findPublicationByOid(Oid oid);
+@@ -826,6 +839,7 @@ extern void getPublicationNamespaces(Archive *fout);
+ extern void getPublicationTables(Archive *fout, TableInfo tblinfo[],
+ 								 int numTables);
+ extern void getSubscriptions(Archive *fout);
++extern ToasterInfo *getToasters(Archive *fout, int *numToasters);
+ extern void getSubscriptionTables(Archive *fout);
+ 
+ #endif							/* PG_DUMP_H */
+diff --git a/src/bin/pg_dump/pg_dump_sort.c b/src/bin/pg_dump/pg_dump_sort.c
+index 297b4df..5af2b4e 100644
+--- a/src/bin/pg_dump/pg_dump_sort.c
++++ b/src/bin/pg_dump/pg_dump_sort.c
+@@ -63,15 +63,18 @@ enum dbObjectTypePriorities
+ 	PRIO_FUNC,
+ 	PRIO_AGG,
+ 	PRIO_ACCESS_METHOD,
++	PRIO_TSPARSER,
+ 	PRIO_OPERATOR,
+ 	PRIO_OPFAMILY,				/* used for DO_OPFAMILY and DO_OPCLASS */
+ 	PRIO_CONVERSION,
++	PRIO_TOASTER,				/* DO_TOASTER */
+ 	PRIO_TSPARSER,
+ 	PRIO_TSTEMPLATE,
+ 	PRIO_TSDICT,
+ 	PRIO_TSCONFIG,
+ 	PRIO_FDW,
+ 	PRIO_FOREIGN_SERVER,
++	PRIO_TOASTER,
+ 	PRIO_TABLE,
+ 	PRIO_TABLE_ATTACH,
+ 	PRIO_DUMMY_TYPE,
+@@ -1740,6 +1743,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
+ 					 "SUBSCRIPTION (ID %d OID %u)",
+ 					 obj->dumpId, obj->catId.oid);
+ 			return;
++		case DO_TOASTER:
++			snprintf(buf, bufsize,
++					 "TOASTER %s  (ID %d OID %u)",
++					 obj->name, obj->dumpId, obj->catId.oid);
++			return;
+ 		case DO_SUBSCRIPTION_REL:
+ 			snprintf(buf, bufsize,
+ 					 "SUBSCRIPTION TABLE (ID %d OID %u)",
+diff --git a/src/bin/psql/command.c b/src/bin/psql/command.c
+index 8912653..205a4da 100644
+--- a/src/bin/psql/command.c
++++ b/src/bin/psql/command.c
+@@ -1145,7 +1145,7 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
+ 				success = describeRoles(pattern, show_verbose, show_system);
+ 				break;
+ 			case 'l':
+-				success = listLargeObjects(show_verbose);
++				success = do_lo_list();
+ 				break;
+ 			case 'L':
+ 				success = listLanguages(pattern, show_verbose, show_system);
+@@ -1193,22 +1193,21 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
+ 				success = listTables(&cmd[1], pattern, show_verbose, show_system);
+ 				break;
+ 			case 'r':
+-				if (cmd[2] == 'd' && cmd[3] == 's')
+-				{
+-					char	   *pattern2 = NULL;
+-
+-					if (pattern)
+-						pattern2 = psql_scan_slash_option(scan_state,
+-														  OT_NORMAL, NULL, true);
+-					success = listDbRoleSettings(pattern, pattern2);
+-
+-					free(pattern2);
+-				}
+-				else if (cmd[2] == 'g')
+-					success = describeRoleGrants(pattern, show_system);
+-				else
+-					status = PSQL_CMD_UNKNOWN;
+-				break;
++   			 	if (cmd[2] == 'd' && cmd[3] == 's')
++   				{
++       				char       *pattern2 = NULL;
++       				if (pattern)
++          				pattern2 = psql_scan_slash_option(scan_state, OT_NORMAL, NULL, true);
++       			 	success = listDbRoleSettings(pattern, pattern2);
++       			 	free(pattern2);
++ 			    }
++    			else if (cmd[2] == '+' || cmd[2] == '\0')
++    				success = describeToasters(pattern, show_verbose);
++  			  	else if (cmd[2] == 'g')
++      				success = describeRoleGrants(pattern, show_system);
++   			 	else
++     				status = PSQL_CMD_UNKNOWN;
++   			 	break;
+ 			case 'R':
+ 				switch (cmd[2])
+ 				{
+diff --git a/src/bin/psql/describe.c b/src/bin/psql/describe.c
+index dd25d2f..758f571 100644
+--- a/src/bin/psql/describe.c
++++ b/src/bin/psql/describe.c
+@@ -1581,7 +1581,7 @@ describeOneTableDetails(const char *schemaname,
+ 	bool		printTableInitialized = false;
+ 	int			i;
+ 	char	   *view_def = NULL;
+-	char	   *headers[12];
++	char	   *headers[13];
+ 	PQExpBufferData title;
+ 	PQExpBufferData tmpbuf;
+ 	int			cols;
+@@ -1596,6 +1596,7 @@ describeOneTableDetails(const char *schemaname,
+ 				indexdef_col = -1,
+ 				fdwopts_col = -1,
+ 				attstorage_col = -1,
++				atttoaster_col = -1,
+ 				attcompression_col = -1,
+ 				attstattarget_col = -1,
+ 				attdescr_col = -1;
+@@ -1949,6 +1950,17 @@ describeOneTableDetails(const char *schemaname,
+ 		appendPQExpBufferStr(&buf, ",\n  a.attstorage");
+ 		attstorage_col = cols++;
+ 
++		/* toaster info, if relevant to relkind */
++		if (pset.sversion >= 150000 &&
++			(tableinfo.relkind == RELKIND_RELATION ||
++			 tableinfo.relkind == RELKIND_PARTITIONED_TABLE ||
++			 tableinfo.relkind == RELKIND_MATVIEW))
++		{
++			appendPQExpBufferStr(&buf, ",\n  (SELECT tsrname FROM pg_toaster "
++				"WHERE oid = a.atttoaster) AS atttoaster");
++			atttoaster_col = cols++;
++		}
++
+ 		/* compression info, if relevant to relkind */
+ 		if (pset.sversion >= 140000 &&
+ 			!pset.hide_compression &&
+@@ -2077,6 +2089,8 @@ describeOneTableDetails(const char *schemaname,
+ 		headers[cols++] = gettext_noop("FDW options");
+ 	if (attstorage_col >= 0)
+ 		headers[cols++] = gettext_noop("Storage");
++	if (atttoaster_col >= 0)
++		headers[cols++] = gettext_noop("Toaster");
+ 	if (attcompression_col >= 0)
+ 		headers[cols++] = gettext_noop("Compression");
+ 	if (attstattarget_col >= 0)
+@@ -2162,6 +2176,17 @@ describeOneTableDetails(const char *schemaname,
+ 										(storage[0] == TYPSTORAGE_EXTERNAL ? "external" :
+ 										 "???")))),
+ 							  false, false);
++
++
++			if (atttoaster_col >= 0)
++			{
++				if (PQgetisnull(res, i, atttoaster_col))
++					printTableAddCell(&cont, "",
++									  false, false);
++				else
++					printTableAddCell(&cont, PQgetvalue(res, i, atttoaster_col),
++									  false, false);
++			}
+ 		}
+ 
+ 		/* Column compression, if relevant */
+@@ -7277,39 +7302,58 @@ error_return:
+  * Lists large objects
+  */
+ bool
+-listLargeObjects(bool verbose)
++describeToasters(const char *pattern, bool verbose)
+ {
+ 	PQExpBufferData buf;
+ 	PGresult   *res;
+ 	printQueryOpt myopt = pset.popt;
++	static const bool translate_columns[] = {false, false, false};
++	int dotcnt;
++
++	if (pset.sversion < 150000)
++	{
++		char		sverbuf[32];
++
++		pg_log_error("The server (version %s) does not support toasters.",
++					 formatPGVersionNumber(pset.sversion, false,
++										   sverbuf, sizeof(sverbuf)));
++		return true;
++	}
+ 
+ 	initPQExpBuffer(&buf);
+ 
+ 	printfPQExpBuffer(&buf,
+-					  "SELECT oid as \"%s\",\n"
+-					  "  pg_catalog.pg_get_userbyid(lomowner) as \"%s\",\n  ",
+-					  gettext_noop("ID"),
+-					  gettext_noop("Owner"));
++					  "SELECT tsrname AS \"%s\"",
++					  gettext_noop("Name"));
+ 
+ 	if (verbose)
+ 	{
+-		printACLColumn(&buf, "lomacl");
+-		appendPQExpBufferStr(&buf, ",\n  ");
++		appendPQExpBuffer(&buf,
++						  ",\n  tsrhandler AS \"%s\",\n"
++						  "  pg_catalog.obj_description(oid, 'pg_toaster') AS \"%s\"",
++						  gettext_noop("Handler"),
++						  gettext_noop("Description"));
+ 	}
+ 
+-	appendPQExpBuffer(&buf,
+-					  "pg_catalog.obj_description(oid, 'pg_largeobject') as \"%s\"\n"
+-					  "FROM pg_catalog.pg_largeobject_metadata\n"
+-					  "ORDER BY oid",
+-					  gettext_noop("Description"));
++	appendPQExpBufferStr(&buf,
++						 "\nFROM pg_catalog.pg_toaster\n");
++
++	processSQLNamePattern(pset.db, &buf, pattern, false, false,
++						  NULL, "tsrname", NULL,
++						  NULL, NULL, &dotcnt);
++
++	appendPQExpBufferStr(&buf, "ORDER BY 1;");
+ 
+ 	res = PSQLexec(buf.data);
+ 	termPQExpBuffer(&buf);
+ 	if (!res)
+ 		return false;
+ 
+-	myopt.title = _("Large objects");
++	myopt.nullPrint = NULL;
++	myopt.title = _("List of toasters");
+ 	myopt.translate_header = true;
++	myopt.translate_columns = translate_columns;
++	myopt.n_translate_columns = lengthof(translate_columns);
+ 
+ 	printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+ 
+diff --git a/src/bin/psql/describe.h b/src/bin/psql/describe.h
+index 18ecaa6..6c79c1e 100644
+--- a/src/bin/psql/describe.h
++++ b/src/bin/psql/describe.h
+@@ -146,6 +146,9 @@ extern bool listOpFamilyOperators(const char *access_method_pattern,
+ extern bool listOpFamilyFunctions(const char *access_method_pattern,
+ 								  const char *family_pattern, bool verbose);
+ 
++/* \dr */
++extern bool describeToasters(const char *pattern, bool verbose);
++
+ /* \dl or \lo_list */
+ extern bool listLargeObjects(bool verbose);
+ 
+diff --git a/src/bin/psql/large_obj.c b/src/bin/psql/large_obj.c
+index 28f8c41..a19a10a 100644
+--- a/src/bin/psql/large_obj.c
++++ b/src/bin/psql/large_obj.c
+@@ -262,3 +262,55 @@ do_lo_unlink(const char *loid_arg)
+ 
+ 	return true;
+ }
++
++
++/*
++ * do_lo_list()
++ *
++ * Show all large objects in database with comments
++ */
++bool
++do_lo_list(void)
++{
++	PGresult   *res;
++	char		buf[1024];
++	printQueryOpt myopt = pset.popt;
++
++	if (pset.sversion >= 90000)
++	{
++		snprintf(buf, sizeof(buf),
++				 "SELECT oid as \"%s\",\n"
++				 "  pg_catalog.pg_get_userbyid(lomowner) as \"%s\",\n"
++				 "  pg_catalog.obj_description(oid, 'pg_largeobject') as \"%s\"\n"
++				 "  FROM pg_catalog.pg_largeobject_metadata "
++				 "  ORDER BY oid",
++				 gettext_noop("ID"),
++				 gettext_noop("Owner"),
++				 gettext_noop("Description"));
++	}
++	else
++	{
++		snprintf(buf, sizeof(buf),
++				 "SELECT loid as \"%s\",\n"
++				 "  pg_catalog.obj_description(loid, 'pg_largeobject') as \"%s\"\n"
++				 "FROM (SELECT DISTINCT loid FROM pg_catalog.pg_largeobject) x\n"
++				 "ORDER BY 1",
++				 gettext_noop("ID"),
++				 gettext_noop("Description"));
++	}
++
++	res = PSQLexec(buf);
++	if (!res)
++		return false;
++
++	myopt.topt.tuples_only = false;
++	myopt.nullPrint = NULL;
++	myopt.title = _("Large objects");
++	myopt.translate_header = true;
++
++	printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
++
++	PQclear(res);
++	return true;
++}
++
+diff --git a/src/bin/psql/large_obj.h b/src/bin/psql/large_obj.h
+index c6467f8..6fc34b3 100644
+--- a/src/bin/psql/large_obj.h
++++ b/src/bin/psql/large_obj.h
+@@ -11,5 +11,6 @@
+ bool		do_lo_export(const char *loid_arg, const char *filename_arg);
+ bool		do_lo_import(const char *filename_arg, const char *comment_arg);
+ bool		do_lo_unlink(const char *loid_arg);
++bool		do_lo_list(void);
+ 
+ #endif							/* LARGE_OBJ_H */
+diff --git a/src/bin/psql/tab-complete.in.c b/src/bin/psql/tab-complete.in.c
+index fdd7e23..b9f2377 100644
+--- a/src/bin/psql/tab-complete.in.c
++++ b/src/bin/psql/tab-complete.in.c
+@@ -1325,6 +1325,7 @@ static const pgsql_thing_t words_after_create[] = {
+ 	{"TEMPORARY", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE TEMPORARY
+ 																			 * TABLE ... */
+ 	{"TEXT SEARCH", NULL, NULL, NULL},
++	{"TOASTER", NULL, NULL, NULL},
+ 	{"TRANSFORM", NULL, NULL, NULL, NULL, THING_NO_ALTER},
+ 	{"TRIGGER", "SELECT tgname FROM pg_catalog.pg_trigger WHERE tgname LIKE '%s' AND NOT tgisinternal"},
+ 	{"TYPE", NULL, NULL, &Query_for_list_of_datatypes},
+@@ -2925,6 +2926,10 @@ match_previous_words(int pattern_id,
+ 	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET", "STORAGE") ||
+ 			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET", "STORAGE"))
+ 		COMPLETE_WITH("DEFAULT", "PLAIN", "EXTERNAL", "EXTENDED", "MAIN");
++	/* ALTER TABLE ALTER [COLUMN] <foo> SET TOASTER */
++	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET", "TOASTER") ||
++			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET", "TOASTER"))
++		COMPLETE_WITH("PLAIN", "EXTERNAL", "EXTENDED", "MAIN");
+ 	/* ALTER TABLE ALTER [COLUMN] <foo> SET STATISTICS */
+ 	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET", "STATISTICS") ||
+ 			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET", "STATISTICS"))
 diff --git a/src/include/access/toasterapi.h b/src/include/access/toasterapi.h
 new file mode 100644
 index 0000000..6f9b48e
@@ -1348,7 +4304,7 @@ index d1ca24d..7527a87 100644
    'commands/trigger.h',
    'executor/tuptable.h',
 diff --git a/src/include/nodes/parsenodes.h b/src/include/nodes/parsenodes.h
-index 161b09f..f135696 100644
+index 161b09f..f3b0a3a 100644
 --- a/src/include/nodes/parsenodes.h
 +++ b/src/include/nodes/parsenodes.h
 @@ -764,6 +764,8 @@ typedef struct ColumnDef
@@ -1368,31 +4324,31 @@ index 161b09f..f135696 100644
 + * JsonTransform -
 + *		untransformed representation of JSON_MODIFY()
 + */
-+typedef struct JsonTransform
-+{
-+	NodeTag		type;
-+	JsonValueExpr *expr;		/* context item expression */
-+	List	   *ops;			/* list of operations */
-+	JsonOutput *output;			/* output clause, if specified */
-+	List	   *passing;		/* list of PASSING clause arguments, if any */
-+	int			location;		/* token location, or -1 if unknown */
-+} JsonTransform;
++// typedef struct JsonTransform
++// {
++// 	NodeTag		type;
++// 	JsonValueExpr *expr;		/* context item expression */
++// 	List	   *ops;			/* list of operations */
++// 	JsonOutput *output;			/* output clause, if specified */
++// 	List	   *passing;		/* list of PASSING clause arguments, if any */
++// 	int			location;		/* token location, or -1 if unknown */
++// } JsonTransform;
 +
-+/*
-+ * JsonTransformOp -
-+ *		untransformed representation of JSON_MODIFY() operations
-+ */
-+typedef struct JsonTransformOp
-+{
-+	NodeTag		type;
-+	Node	   *pathspec;
-+	Node	   *expr;
-+	JsonTransformOpType op_type;
-+	JsonTransformBehavior on_existing;
-+	JsonTransformBehavior on_missing;
-+	JsonTransformBehavior on_null;
-+	int			location;		/* token location, or -1 if unknown */
-+} JsonTransformOp;
++// /*
++//  * JsonTransformOp -
++//  *		untransformed representation of JSON_MODIFY() operations
++//  */
++// typedef struct JsonTransformOp
++// {
++// 	NodeTag		type;
++// 	Node	   *pathspec;
++// 	Node	   *expr;
++// 	JsonTransformOpType op_type;
++// 	JsonTransformBehavior on_existing;
++// 	JsonTransformBehavior on_missing;
++// 	JsonTransformBehavior on_null;
++// 	int			location;		/* token location, or -1 if unknown */
++// } JsonTransformOp;
 +
 +
  

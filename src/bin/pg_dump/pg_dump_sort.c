@@ -63,10 +63,11 @@ enum dbObjectTypePriorities
 	PRIO_FUNC,
 	PRIO_AGG,
 	PRIO_ACCESS_METHOD,
+	PRIO_TSPARSER,
 	PRIO_OPERATOR,
 	PRIO_OPFAMILY,				/* used for DO_OPFAMILY and DO_OPCLASS */
 	PRIO_CONVERSION,
-	PRIO_TSPARSER,
+	PRIO_TOASTER,				/* DO_TOASTER */
 	PRIO_TSTEMPLATE,
 	PRIO_TSDICT,
 	PRIO_TSCONFIG,
@@ -1739,6 +1740,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 			snprintf(buf, bufsize,
 					 "SUBSCRIPTION (ID %d OID %u)",
 					 obj->dumpId, obj->catId.oid);
+			return;
+		case DO_TOASTER:
+			snprintf(buf, bufsize,
+					 "TOASTER %s  (ID %d OID %u)",
+					 obj->name, obj->dumpId, obj->catId.oid);
 			return;
 		case DO_SUBSCRIPTION_REL:
 			snprintf(buf, bufsize,
