@@ -10,7 +10,7 @@
  */
 #include "postgres.h"
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/genam.h"
 #include "access/heaptoast.h"
 #include "access/multixact.h"
@@ -29,6 +29,8 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
+#include "access/toast_helper.h"
+#include "catalog/toasting.h"
 
 PG_FUNCTION_INFO_V1(verify_heapam);
 
@@ -1866,6 +1868,7 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	uint32		extsize;
 	int32		expected_chunk_seq = 0;
 	int32		last_chunk_seq;
+	SnapshotData SnapshotToast;
 
 	extsize = VARATT_EXTERNAL_GET_EXTSIZE(ta->toast_pointer);
 	last_chunk_seq = (extsize - 1) / TOAST_MAX_CHUNK_SIZE;
@@ -1882,9 +1885,10 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	 * Check if any chunks for this toasted object exist in the toast table,
 	 * accessible via the index.
 	 */
+	init_toast_snapshot(&SnapshotToast);
 	toastscan = systable_beginscan_ordered(ctx->toast_rel,
 										   ctx->valid_toast_index,
-										   get_toast_snapshot(), 1,
+										   &SnapshotToast, 1,
 										   &toastkey);
 	found_toasttup = false;
 	while ((toasttup =

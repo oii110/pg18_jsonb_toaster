@@ -14,7 +14,7 @@
  */
 #include "postgres.h"
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/htup_details.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
@@ -27,6 +27,7 @@
 #include "utils/builtins.h"
 #include "utils/pg_locale.h"
 #include "utils/varlena.h"
+#include "access/toast_helper.h"
 
 /* common code for bpchartypmodin and varchartypmodin */
 static int32
