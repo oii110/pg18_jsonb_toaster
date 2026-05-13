@@ -1885,11 +1885,12 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	 * Check if any chunks for this toasted object exist in the toast table,
 	 * accessible via the index.
 	 */
+	SnapshotData SnapshotToast;
 	init_toast_snapshot(&SnapshotToast);
 	toastscan = systable_beginscan_ordered(ctx->toast_rel,
-										   ctx->valid_toast_index,
-										   &SnapshotToast, 1,
-										   &toastkey);
+                                       ctx->valid_toast_index,
+                                       &SnapshotToast, 1,
+                                       &toastkey);
 	found_toasttup = false;
 	while ((toasttup =
 			systable_getnext_ordered(toastscan,

@@ -143,8 +143,8 @@ extern HeapTuple toast_build_flattened_tuple(TupleDesc tupleDesc,
  * ----------
  */
 extern void heap_fetch_toast_slice(Relation toastrel, Oid valueid,
-					   struct varlena *attr, int32 attrsize,
-					   int32 sliceoffset, int32 slicelength,
-					   struct varlena *result);
+								   struct varlena *attr,
+								   int32 attrsize, int32 sliceoffset,
+								   int32 slicelength, struct varlena *result);
 
 #endif							/* HEAPTOAST_H */

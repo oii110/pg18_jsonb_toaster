@@ -14,12 +14,13 @@
 
 #include "postgres.h"
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
 #include "catalog/pg_type_d.h"
 #include "catalog/pg_toaster.h"
 #include "varatt.h"
+#include "access/toast_helper.h"
 
 /*
  * Prepare to TOAST a tuple.
@@ -1039,8 +1040,8 @@ fetch_toast_slice(Relation toastrel, Oid valueid,
 					   int32 sliceoffset, int32 slicelength,
 					   struct varlena *result)
 {
-	toast_fetch_toast_slice( toastrel, valueid,
+	toast_fetch_toast_slice(toastrel, valueid,
 					   attr, attrsize,
 					   sliceoffset, slicelength,
-					   result);
+					   result, 0, NULL, NULL);
 }

@@ -62,6 +62,7 @@
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "catalog/pg_toaster.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "commands/user.h"
