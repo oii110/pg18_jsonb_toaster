@@ -16,7 +16,7 @@
 
 #include <ctype.h>
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -26,6 +26,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
+#include "access/toast_helper.h"
 
 
 /*
