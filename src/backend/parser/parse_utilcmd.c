@@ -1197,6 +1197,8 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 		 */
 		def = makeColumnDef(NameStr(attribute->attname), attribute->atttypid,
 							attribute->atttypmod, attribute->attcollation);
+		
+		def->toaster = NULL;
 
 		/*
 		 * Add to column list
@@ -1662,6 +1664,7 @@ transformOfType(CreateStmtContext *cxt, TypeName *ofTypename)
 		n = makeColumnDef(NameStr(attr->attname), attr->atttypid,
 						  attr->atttypmod, attr->attcollation);
 		n->is_from_type = true;
+		n->toaster = NULL;
 
 		cxt->columns = lappend(cxt->columns, n);
 	}

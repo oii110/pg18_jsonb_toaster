@@ -43,3 +43,6 @@ lib*.pc
 /Release/
 /tmp_install/
 /portlock/
+/src/test/regress/regression.diffs
+/src/test/regress/regression.out
+/full_series.patch

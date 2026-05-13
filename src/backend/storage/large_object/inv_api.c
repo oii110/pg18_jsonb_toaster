@@ -32,7 +32,7 @@
 
 #include <limits.h>
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
@@ -48,7 +48,7 @@
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-
+#include "access/toast_helper.h"
 
 /*
  * GUC: backwards-compatibility flag to suppress LO permission checks

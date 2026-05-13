@@ -1145,7 +1145,7 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 				success = describeRoles(pattern, show_verbose, show_system);
 				break;
 			case 'l':
-				success = listLargeObjects(show_verbose);
+				success = do_lo_list();
 				break;
 			case 'L':
 				success = listLanguages(pattern, show_verbose, show_system);
@@ -1193,22 +1193,21 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 				success = listTables(&cmd[1], pattern, show_verbose, show_system);
 				break;
 			case 'r':
-				if (cmd[2] == 'd' && cmd[3] == 's')
-				{
-					char	   *pattern2 = NULL;
-
-					if (pattern)
-						pattern2 = psql_scan_slash_option(scan_state,
-														  OT_NORMAL, NULL, true);
-					success = listDbRoleSettings(pattern, pattern2);
-
-					free(pattern2);
-				}
-				else if (cmd[2] == 'g')
-					success = describeRoleGrants(pattern, show_system);
-				else
-					status = PSQL_CMD_UNKNOWN;
-				break;
+   			 	if (cmd[2] == 'd' && cmd[3] == 's')
+   				{
+       				char       *pattern2 = NULL;
+       				if (pattern)
+          				pattern2 = psql_scan_slash_option(scan_state, OT_NORMAL, NULL, true);
+       			 	success = listDbRoleSettings(pattern, pattern2);
+       			 	free(pattern2);
+ 			    }
+    			else if (cmd[2] == '+' || cmd[2] == '\0')
+    				success = describeToasters(pattern, show_verbose);
+  			  	else if (cmd[2] == 'g')
+      				success = describeRoleGrants(pattern, show_system);
+   			 	else
+     				status = PSQL_CMD_UNKNOWN;
+   			 	break;
 			case 'R':
 				switch (cmd[2])
 				{
@@ -2413,14 +2412,14 @@ exec_command_lo(PsqlScanState scan_state, bool active_branch, const char *cmd)
 			bool		show_verbose;
 			unsigned short int save_expanded;
 
-			show_verbose = strchr(cmd, '+') ? true : false;
+			//show_verbose = strchr(cmd, '+') ? true : false;
 
 			/* if 'x' option specified, force expanded mode */
 			save_expanded = pset.popt.topt.expanded;
 			if (strchr(cmd, 'x'))
 				pset.popt.topt.expanded = 1;
 
-			success = listLargeObjects(show_verbose);
+			success = do_lo_list();
 
 			/* restore original expanded mode */
 			pset.popt.topt.expanded = save_expanded;

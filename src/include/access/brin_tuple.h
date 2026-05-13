@@ -13,6 +13,8 @@
 
 #include "access/brin_internal.h"
 #include "access/tupdesc.h"
+#include "access/toast_internals.h"
+#include "access/toast_helper.h"
 
 /*
  * The BRIN opclasses may register serialization callback, in case the on-disk

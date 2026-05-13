@@ -62,6 +62,7 @@
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "catalog/pg_toaster.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "commands/user.h"
@@ -6722,7 +6723,9 @@ alter_table_type_to_string(AlterTableType cmdtype)
 		case AT_DropIdentity:
 			return "ALTER COLUMN ... DROP IDENTITY";
 		case AT_ReAddStatistics:
-			return NULL;		/* not real grammar */
+			return NULL;		
+		case AT_SetToaster:
+			return "ALTER COLUMN ... SET TOASTER";/* not real grammar */
 	}
 
 	return NULL;
