@@ -62,7 +62,6 @@ static void datum_to_jsonb_internal(Datum val, bool is_null, JsonbInState *resul
 									bool key_scalar);
 static void add_jsonb(Datum val, bool is_null, JsonbInState *result,
 					  Oid val_type, bool key_scalar);
-static JsonbParseState *clone_parse_state(JsonbParseState *state);
 static char *JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool indent);
 static void add_indent(StringInfo out, bool indent, int level);
 
@@ -1467,35 +1466,6 @@ close_object:
  * final functions that will only append to the values rather than
  * change them.
  */
-static JsonbParseState *
-clone_parse_state(JsonbParseState *state)
-{
-	JsonbParseState *result,
-			   *icursor,
-			   *ocursor;
-
-	if (state == NULL)
-		return NULL;
-
-	result = palloc(sizeof(JsonbParseState));
-	icursor = state;
-	ocursor = result;
-	for (;;)
-	{
-		ocursor->contVal = icursor->contVal;
-		ocursor->size = icursor->size;
-		ocursor->unique_keys = icursor->unique_keys;
-		ocursor->skip_nulls = icursor->skip_nulls;
-		icursor = icursor->next;
-		if (icursor == NULL)
-			break;
-		ocursor->next = palloc(sizeof(JsonbParseState));
-		ocursor = ocursor->next;
-	}
-	ocursor->next = NULL;
-
-	return result;
-}
 
 static Datum
 jsonb_agg_transfn_worker(FunctionCallInfo fcinfo, bool absent_on_null)
@@ -1659,7 +1629,7 @@ jsonb_agg_finalfn(PG_FUNCTION_ARGS)
 	 */
 	memset(&result, 0, sizeof(JsonbInState));
 
-	result.parseState = clone_parse_state(arg->res->parseState);
+	result.parseState = JsonbParseStateClone(arg->res->parseState);
 
 	result.res = pushJsonbValue(&result.parseState,
 								WJB_END_ARRAY, NULL);
@@ -1950,7 +1920,7 @@ jsonb_object_agg_finalfn(PG_FUNCTION_ARGS)
 	 */
 	memset(&result, 0, sizeof(JsonbInState));
 
-	result.parseState = clone_parse_state(arg->res->parseState);
+	result.parseState = JsonbParseStateClone(arg->res->parseState);
 
 	result.res = pushJsonbValue(&result.parseState,
 								WJB_END_OBJECT, NULL);
