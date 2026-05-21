@@ -357,6 +357,9 @@ JsonbPGetDatum(const Jsonb *p)
 #define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
 #define PG_RETURN_JSONB_P(x)	PG_RETURN_DATUM(JsonbPGetDatum(x))
 
+#define JsonbRoot(jsonb)	(&(jsonb)->root)
+#define JsonbGetSize(jsonb)	VARSIZE(jsonb)
+
 /* Support functions */
 extern int	compareJsonbContainers(JsonbContainer *a, JsonbContainer *b);
 extern JsonbValue *findJsonbValueFromContainer(const JsonbContainer *container,
