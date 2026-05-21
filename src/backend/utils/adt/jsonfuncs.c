@@ -481,10 +481,10 @@ static JsonbValue *setPath(JsonbIterator **it, Datum *path_elems,
 						   bool *path_nulls, int path_len,
 						   JsonbParseState **st, int level, JsonbValue *newval,
 						   int op_type);
-static void setPathObject(JsonbIterator **it, Datum *path_elems,
-						  bool *path_nulls, int path_len, JsonbParseState **st,
-						  int level,
-						  JsonbValue *newval, uint32 npairs, int op_type);
+static JsonbIteratorToken setPathObject(JsonbIterator **it, Datum *path_elems,
+										bool *path_nulls, int path_len,
+										JsonbParseState **st, int level,
+										JsonbValue *newval, int op_type);
 static void setPathArray(JsonbIterator **it, Datum *path_elems,
 						 bool *path_nulls, int path_len, JsonbParseState **st,
 						 int level,
@@ -5246,9 +5246,8 @@ setPath(JsonbIterator **it, Datum *path_elems,
 			break;
 		case WJB_BEGIN_OBJECT:
 			(void) pushJsonbValue(st, r, NULL);
-			setPathObject(it, path_elems, path_nulls, path_len, st, level,
-						  newval, v.val.object.nPairs, op_type);
-			r = JsonbIteratorNext(it, &v, true);
+			r = setPathObject(it, path_elems, path_nulls, path_len, st, level,
+							  newval, op_type);
 			Assert(r == WJB_END_OBJECT);
 			res = pushJsonbValue(st, r, NULL);
 			break;
@@ -5282,48 +5281,24 @@ setPath(JsonbIterator **it, Datum *path_elems,
 /*
  * Object walker for setPath
  */
-static void
+static JsonbIteratorToken
 setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 			  int path_len, JsonbParseState **st, int level,
-			  JsonbValue *newval, uint32 npairs, int op_type)
+			  JsonbValue *newval, int op_type)
 {
-	text	   *pathelem = NULL;
-	int			i;
 	JsonbValue	k,
 				v;
+	JsonbIteratorToken r;
 	bool		done = false;
 
 	if (level >= path_len || path_nulls[level])
 		done = true;
-	else
+
+	while ((r = JsonbIteratorNext(it, &k, true)) == WJB_KEY)
 	{
-		/* The path Datum could be toasted, in which case we must detoast it */
-		pathelem = DatumGetTextPP(path_elems[level]);
-	}
-
-	/* empty object is a special case for create */
-	if ((npairs == 0) && (op_type & JB_PATH_CREATE_OR_INSERT) &&
-		(level == path_len - 1))
-	{
-		JsonbValue	newkey;
-
-		newkey.type = jbvString;
-		newkey.val.string.val = VARDATA_ANY(pathelem);
-		newkey.val.string.len = VARSIZE_ANY_EXHDR(pathelem);
-
-		(void) pushJsonbValue(st, WJB_KEY, &newkey);
-		(void) pushJsonbValue(st, WJB_VALUE, newval);
-	}
-
-	for (i = 0; i < npairs; i++)
-	{
-		JsonbIteratorToken r = JsonbIteratorNext(it, &k, true);
-
-		Assert(r == WJB_KEY);
-
 		if (!done &&
-			k.val.string.len == VARSIZE_ANY_EXHDR(pathelem) &&
-			memcmp(k.val.string.val, VARDATA_ANY(pathelem),
+			k.val.string.len == VARSIZE_ANY_EXHDR(path_elems[level]) &&
+			memcmp(k.val.string.val, VARDATA_ANY(path_elems[level]),
 				   k.val.string.len) == 0)
 		{
 			done = true;
@@ -5342,6 +5317,8 @@ setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 									 "to replace key value.")));
 
 				r = JsonbIteratorNext(it, &v, true);	/* skip value */
+				Assert(r == WJB_VALUE);
+
 				if (!(op_type & JB_PATH_DELETE))
 				{
 					(void) pushJsonbValue(st, WJB_KEY, &k);
@@ -5357,19 +5334,6 @@ setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 		}
 		else
 		{
-			if ((op_type & JB_PATH_CREATE_OR_INSERT) && !done &&
-				level == path_len - 1 && i == npairs - 1)
-			{
-				JsonbValue	newkey;
-
-				newkey.type = jbvString;
-				newkey.val.string.val = VARDATA_ANY(pathelem);
-				newkey.val.string.len = VARSIZE_ANY_EXHDR(pathelem);
-
-				(void) pushJsonbValue(st, WJB_KEY, &newkey);
-				(void) pushJsonbValue(st, WJB_VALUE, newval);
-			}
-
 			(void) pushJsonbValue(st, r, &k);
 			r = JsonbIteratorNext(it, &v, true);
 			Assert(r == WJB_VALUE);
@@ -5377,7 +5341,10 @@ setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 		}
 	}
 
-	/*--
+	if (done)
+		return r;
+
+	/*
 	 * If we got here there are only few possibilities:
 	 * - no target path was found, and an open object with some keys/values was
 	 *   pushed into the state
@@ -5387,20 +5354,27 @@ setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 	 * generate the whole chain of empty objects and insert the new value
 	 * there.
 	 */
-	if (!done && (op_type & JB_PATH_FILL_GAPS) && (level < path_len - 1))
+	if ((level < path_len - 1 && (op_type & JB_PATH_FILL_GAPS)) ||
+		(level == path_len - 1 && (op_type & JB_PATH_CREATE_OR_INSERT)))
 	{
 		JsonbValue	newkey;
 
 		newkey.type = jbvString;
-		newkey.val.string.val = VARDATA_ANY(pathelem);
-		newkey.val.string.len = VARSIZE_ANY_EXHDR(pathelem);
+		newkey.val.string.len = VARSIZE_ANY_EXHDR(path_elems[level]);
+		newkey.val.string.val = VARDATA_ANY(path_elems[level]);
 
 		(void) pushJsonbValue(st, WJB_KEY, &newkey);
-		(void) push_path(st, level, path_elems, path_nulls,
-						 path_len, newval);
+
+		if (level == path_len - 1)
+			(void) pushJsonbValue(st, WJB_VALUE, newval);
+		else
+			(void) push_path(st, level, path_elems, path_nulls,
+							 path_len, newval);
 
 		/* Result is closed with WJB_END_OBJECT outside of this function */
 	}
+
+	return r;
 }
 
 /*
