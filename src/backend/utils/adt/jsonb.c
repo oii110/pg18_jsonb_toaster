@@ -44,7 +44,6 @@ typedef struct JsonbAggState
 
 static inline Datum jsonb_from_cstring(char *json, int len, bool unique_keys,
 									   Node *escontext);
-static bool checkStringLen(size_t len, Node *escontext);
 static JsonParseErrorType jsonb_in_object_start(void *pstate);
 static JsonParseErrorType jsonb_in_object_end(void *pstate);
 static JsonParseErrorType jsonb_in_array_start(void *pstate);
@@ -272,18 +271,6 @@ jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
 	PG_RETURN_JSONB_P(JsonbValueToJsonb(state.res));
 }
 
-static bool
-checkStringLen(size_t len, Node *escontext)
-{
-	if (len > JENTRY_OFFLENMASK)
-		ereturn(escontext, false,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("string too long to represent as jsonb string"),
-				 errdetail("Due to an implementation restriction, jsonb strings cannot exceed %d bytes.",
-						   JENTRY_OFFLENMASK)));
-
-	return true;
-}
 
 static JsonParseErrorType
 jsonb_in_object_start(void *pstate)
@@ -335,8 +322,8 @@ jsonb_in_object_field_start(void *pstate, char *fname, bool isnull)
 	Assert(fname != NULL);
 	v.type = jbvString;
 	v.val.string.len = strlen(fname);
-	if (!checkStringLen(v.val.string.len, _state->escontext))
-		return JSON_SEM_ACTION_FAILED;
+	// if (!checkStringLen(v.val.string.len, _state->escontext))
+	// 	return JSON_SEM_ACTION_FAILED;
 	v.val.string.val = fname;
 
 	_state->res = pushJsonbValue(&_state->parseState, WJB_KEY, &v);
@@ -389,8 +376,8 @@ jsonb_in_scalar(void *pstate, char *token, JsonTokenType tokentype)
 			Assert(token != NULL);
 			v.type = jbvString;
 			v.val.string.len = strlen(token);
-			if (!checkStringLen(v.val.string.len, _state->escontext))
-				return JSON_SEM_ACTION_FAILED;
+			// if (!checkStringLen(v.val.string.len, _state->escontext))
+			// 	return JSON_SEM_ACTION_FAILED;
 			v.val.string.val = token;
 			break;
 		case JSON_TOKEN_NUMBER:
@@ -779,7 +766,7 @@ datum_to_jsonb_internal(Datum val, bool is_null, JsonbInState *result,
 				outputstr = OidOutputFunctionCall(outfuncoid, val);
 				jb.type = jbvString;
 				jb.val.string.len = strlen(outputstr);
-				(void) checkStringLen(jb.val.string.len, NULL);
+				//(void) checkStringLen(jb.val.string.len, NULL);
 				jb.val.string.val = outputstr;
 				break;
 		}
