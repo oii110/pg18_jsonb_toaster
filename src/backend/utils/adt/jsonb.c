@@ -242,8 +242,8 @@ jsonb_typeof(PG_FUNCTION_ARGS)
  * If escontext points to an ErrorSaveContext, errors are reported there
  * instead of being thrown.
  */
-static inline Datum
-jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
+static JsonbValue *
+JsonValueFromCString(char *json, int len, bool unique_keys, Node *escontext)
 {
 	JsonLexContext lex;
 	JsonbInState state;
@@ -265,12 +265,22 @@ jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
 	sem.object_field_start = jsonb_in_object_field_start;
 
 	if (!pg_parse_json_or_errsave(&lex, &sem, escontext))
-		return (Datum) 0;
+		return NULL;
 
-	/* after parsing, the item member has the composed jsonb structure */
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(state.res));
+
+	return state.res;
 }
 
+static inline Datum
+jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
+{
+	JsonbValue *res = JsonValueFromCString(json, len, unique_keys, escontext);
+
+    if (res == NULL)
+        return (Datum) 0;         
+
+    PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+}
 
 static JsonParseErrorType
 jsonb_in_object_start(void *pstate)
