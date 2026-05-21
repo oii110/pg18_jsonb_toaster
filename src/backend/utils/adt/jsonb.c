@@ -1029,7 +1029,8 @@ to_jsonb(PG_FUNCTION_ARGS)
 	json_categorize_type(val_type, true,
 						 &tcategory, &outfuncoid);
 
-    PG_RETURN_JSONB_P((Jsonb *) DatumGetPointer(datum_to_jsonb(val, tcategory, outfuncoid)));}
+    PG_RETURN_JSONB_P((Jsonb *) DatumGetPointer(datum_to_jsonb(val, tcategory, outfuncoid)));
+}
 
 /*
  * Turn a Datum into jsonb.
