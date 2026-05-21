@@ -36,6 +36,15 @@
 #define JSONB_MAX_ELEMS (Min(MaxAllocSize / sizeof(JsonbValue), JB_CMASK))
 #define JSONB_MAX_PAIRS (Min(MaxAllocSize / sizeof(JsonbPair), JB_CMASK))
 
+struct JsonbParseState
+{
+	JsonbValue	contVal;
+	Size		size;
+	struct JsonbParseState *next;
+	bool		unique_keys;	/* Check object key uniqueness */
+	bool		skip_nulls;		/* Skip null object fields */
+};
+
 static void fillJsonbValue(JsonbContainer *container, int index,
 						   char *base_addr, uint32 offset,
 						   JsonbValue *result);
@@ -576,6 +585,18 @@ JsonbParseStateClone(JsonbParseState *state)
 	*pocursor = NULL;
 
 	return result;
+}
+
+void
+JsonbParseStateSetUniqueKeys(JsonbParseState *state, bool unique_keys)
+{
+	state->unique_keys = unique_keys;
+}
+
+void
+JsonbParseStateSetSkipNulls(JsonbParseState *state, bool skip_nulls)
+{
+	state->skip_nulls = skip_nulls;
 }
 
 
