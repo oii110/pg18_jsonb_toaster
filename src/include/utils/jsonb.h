@@ -213,15 +213,6 @@ typedef struct
 	JsonbContainer root;
 } Jsonb;
 
-#ifdef JSONB_UTIL_C
-#define JB_HEADER(jbp_)			(((JsonbContainer *) VARDATA(jbp_))->header)
-
-/* convenience macros for accessing the root container in a Jsonb datum */
-#define JB_ROOT_COUNT(jbp_)		(*(uint32 *) VARDATA(jbp_) & JB_CMASK)
-#define JB_ROOT_IS_SCALAR(jbp_) ((*(uint32 *) VARDATA(jbp_) & JB_FSCALAR) != 0)
-#define JB_ROOT_IS_OBJECT(jbp_) ((*(uint32 *) VARDATA(jbp_) & JB_FOBJECT) != 0)
-#define JB_ROOT_IS_ARRAY(jbp_)	((*(uint32 *) VARDATA(jbp_) & JB_FARRAY) != 0)
-#endif
 
 
 typedef enum jbvType
@@ -336,28 +327,8 @@ typedef enum
 typedef struct JsonbIterator JsonbIterator;
 
 
-/* Convenience macros */
-static inline Jsonb *
-DatumGetJsonbP(Datum d)
-{
-	return (Jsonb *) PG_DETOAST_DATUM(d);
-}
 
-static inline Jsonb *
-DatumGetJsonbPCopy(Datum d)
-{
-	return (Jsonb *) PG_DETOAST_DATUM_COPY(d);
-}
-
-static inline Datum
-JsonbPGetDatum(const Jsonb *p)
-{
-	return PointerGetDatum(p);
-}
-
-#define PG_GETARG_JSONB_P(x)	DatumGetJsonbP(PG_GETARG_DATUM(x))
-#define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
-#define PG_RETURN_JSONB_P(x)	PG_RETURN_DATUM(JsonbPGetDatum(x))
+#define PG_GETARG
 
 #define JsonbRoot(jsonb)	(&(jsonb)->root)
 #define JsonbGetSize(jsonb)	VARSIZE(jsonb)
