@@ -16,7 +16,8 @@
 
 static JsonContainerOps jsonvContainerOps;
 
-static Json *JsonExpand(Datum value, JsonContainerOps *ops);
+static Json *JsonExpand(Json *tmp, Datum value, bool freeValue,
+						JsonContainerOps *ops);
 
 #if 0
 static JsonValue *
@@ -564,7 +565,7 @@ JsonToJsonValue(Json *json, JsonValue *jv)
 {
 	if (JsonRoot(json)->ops == &jsonvContainerOps)
 		return (JsonValue *) JsonRoot(json)->data;
-		
+
 	if (!jv)
 		jv = palloc(sizeof(JsonValue));
 
@@ -594,11 +595,13 @@ JsonInit(Json *json)
 }
 
 static Json *
-JsonExpand(Datum value, JsonContainerOps *ops)
+JsonExpand(Json *tmp, Datum value, bool freeValue, JsonContainerOps *ops)
 {
-	Json		   *json = (Json *) palloc(sizeof(Json));
+	Json		   *json = tmp ? tmp : (Json *) palloc(sizeof(Json));
 
 	json->obj.value = value;
+	json->obj.freeValue = freeValue;
+	json->obj.isTemporary = tmp != NULL;
 	json->root.data = NULL;
 	json->root.len = 0;
 	json->root.ops = ops;
@@ -609,31 +612,69 @@ JsonExpand(Datum value, JsonContainerOps *ops)
 	return json;
 }
 
-Json *
-DatumGetJson(Datum value, JsonContainerOps *ops)
+static Json *
+JsonExpandDatum(Datum value, JsonContainerOps *ops, Json *tmp)
 {
 	struct varlena *toasted = (struct varlena *) DatumGetPointer(value);
 	struct varlena *detoasted = pg_detoast_datum(toasted);
-	Json	   *json = JsonExpand(PointerGetDatum(detoasted), ops);
+	Json	   *json = JsonExpand(tmp, PointerGetDatum(detoasted),
+								  toasted != detoasted, ops);
+
+	return json;
+}
+
+Json *
+DatumGetJson(Datum value, JsonContainerOps *ops, Json *tmp)
+{
+	Json	   *json = JsonExpandDatum(value, ops, tmp);
 
 	JsonInit(json);
 
 	return json;
 }
 
+void
+JsonFree(Json *json)
+{
+	if (json->obj.freeValue)
+		pfree(DatumGetPointer(json->obj.value));
+
+	if (!JsonIsTemporary(json))
+		pfree(json);
+}
+
+Json *
+JsonCopyTemporary(Json *tmp)
+{
+	Json *json = (Json *) palloc(sizeof(Json));
+
+	memcpy(json, tmp, sizeof(Json));
+	tmp->obj.freeValue = false;
+	json->obj.isTemporary = false;
+
+	return json;
+}
+
+
 Json *
 JsonValueToJson(JsonValue *val)
 {
 	if (val->type == jbvBinary)
 	{
-		Json *json = JsonExpand(PointerGetDatum(NULL), NULL);
-		json->root = *val->val.binary.data;
+		JsonContainer *jc = val->val.binary.data;
+		Json	   *json = JsonExpand(NULL, PointerGetDatum(NULL), false,
+									  jc->ops);
+
+		json->root = *jc;
 		return json;
 	}
 	else
 	{
-		Json *json = JsonExpand(PointerGetDatum(NULL), &jsonvContainerOps);
+		Json	   *json = JsonExpand(NULL, PointerGetDatum(NULL), false,
+									  &jsonvContainerOps);
+
 		jsonvInitContainer(&json->root, val);
+
 		return json;
 	}
 }
