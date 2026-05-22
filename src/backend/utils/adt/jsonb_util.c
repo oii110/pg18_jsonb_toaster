@@ -103,7 +103,8 @@ static int	lengthCompareJsonbPair(const void *a, const void *b, void *binequal);
 static void uniqueifyJsonbObject(JsonbValue *object, bool unique_keys,
 								 bool skip_nulls);
 static JsonbValue *pushSingleScalarJsonbValue(JsonbParseState **pstate,
-											  const JsonbValue *jbval);
+											  const JsonbValue *jbval,
+											  bool unpackBinary);
 static void jsonbInitContainer(JsonContainerData *jc, JsonbContainer *jbc, int len);
 JsonValue *
 JsonValueUnpackBinary(const JsonValue *jbv)
@@ -157,28 +158,20 @@ void *
 JsonValueFlatten(const JsonValue *val, JsonValueEncoder encoder,
 				 JsonContainerOps *ops)
 {
-	Jsonb	   *out;
+	if (val->type == jbvBinary)
+		return JsonContainerFlatten(val->val.binary.data, encoder, ops, val);
 
 	if (IsAJsonbScalar(val))
 	{
-		/* Scalar value */
 		JsonbParseState *pstate = NULL;
-		JsonbValue *res = pushSingleScalarJsonbValue(&pstate, val);
-		out = convertToJsonb(res, encoder);
-	}
-	else if (val->type == jbvObject || val->type == jbvArray)
-	{
-		out = convertToJsonb(val, encoder);
+		val = pushSingleScalarJsonbValue(&pstate, val, true);
 	}
 	else
 	{
-		Assert(val->type == jbvBinary);
-		out = palloc(VARHDRSZ + val->val.binary.len);
-		SET_VARSIZE(out, VARHDRSZ + val->val.binary.len);
-		memcpy(VARDATA(out), val->val.binary.data, val->val.binary.len);
+		Assert(val->type == jbvObject || val->type == jbvArray);
 	}
 
-	return out;
+	return convertToJsonb(val, encoder);
 }
 
 /*
@@ -718,8 +711,8 @@ JsonbParseStateSetSkipNulls(JsonbParseState *state, bool skip_nulls)
  * are unpacked before being added to the result.
  */
 JsonbValue *
-pushJsonbValue(JsonbParseState **pstate, JsonbIteratorToken seq,
-			   const JsonbValue *jbval)
+pushJsonbValueExt(JsonbParseState **pstate, JsonbIteratorToken seq,
+			   const JsonbValue *jbval, bool unpackBinary)
 {
 	JsonIterator *it;
 	JsonbValue *res = NULL;
@@ -733,7 +726,7 @@ pushJsonbValue(JsonbParseState **pstate, JsonbIteratorToken seq,
 		for (i = 0; i < jbval->val.object.nPairs; i++)
 		{
 			pushJsonbValue(pstate, WJB_KEY, &jbval->val.object.pairs[i].key);
-			pushJsonbValue(pstate, WJB_VALUE, &jbval->val.object.pairs[i].value);
+			pushJsonbValueExt(pstate, WJB_VALUE, &jbval->val.object.pairs[i].value, unpackBinary);
 		}
 
 		return pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
@@ -741,17 +734,21 @@ pushJsonbValue(JsonbParseState **pstate, JsonbIteratorToken seq,
 
 	if (jbval && (seq == WJB_ELEM || seq == WJB_VALUE) && jbval->type == jbvArray)
 	{
+		if (jbval->val.array.rawScalar)
+			return pushJsonbValue(pstate, seq, &jbval->val.array.elems[0]);
+
 		pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+
 		for (i = 0; i < jbval->val.array.nElems; i++)
 		{
-			pushJsonbValue(pstate, WJB_ELEM, &jbval->val.array.elems[i]);
+			pushJsonbValueExt(pstate, WJB_ELEM, &jbval->val.array.elems[i], unpackBinary);
 		}
 
 		return pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
 	}
 
 	if (!jbval || (seq != WJB_ELEM && seq != WJB_VALUE) ||
-		jbval->type != jbvBinary)
+		jbval->type != jbvBinary || !unpackBinary)
 	{
 		/* drop through */
 		return pushJsonbValueScalar(pstate, seq, jbval);
@@ -839,7 +836,7 @@ pushJsonbValueScalar(JsonbParseState **pstate, JsonbIteratorToken seq,
 			appendValue(*pstate, scalarVal);
 			break;
 		case WJB_ELEM:
-			Assert(IsAJsonbScalar(scalarVal));
+			// Assert(IsAJsonbScalar(scalarVal));
 			appendElement(*pstate, scalarVal);
 			break;
 		case WJB_END_OBJECT:
@@ -880,7 +877,8 @@ pushJsonbValueScalar(JsonbParseState **pstate, JsonbIteratorToken seq,
 }
 
 static JsonbValue *
-pushSingleScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval)
+pushSingleScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval,
+						   bool unpackBinary)
 {
 	/* single root scalar */
 	JsonbValue	va;
@@ -894,16 +892,18 @@ pushSingleScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval)
 	return pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
 }
 
+
 static JsonbValue *
 pushNestedScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval,
-						   bool isKey)
+						   bool isKey, bool unpackBinary)
 {
 	switch ((*pstate)->contVal.type)
 	{
 		case jbvArray:
-			return pushJsonbValue(pstate, WJB_ELEM, jbval);
+			return pushJsonbValueExt(pstate, WJB_ELEM, jbval, unpackBinary);
 		case jbvObject:
-			return pushJsonbValue(pstate, isKey ? WJB_KEY : WJB_VALUE, jbval);
+			return pushJsonbValueExt(pstate, isKey ? WJB_KEY : WJB_VALUE, jbval,
+									 unpackBinary);
 		default:
 			elog(ERROR, "unexpected parent of nested structure");
 			return NULL;
@@ -911,11 +911,12 @@ pushNestedScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval,
 }
 
 JsonbValue *
-pushScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval, bool isKey)
+pushScalarJsonbValue(JsonbParseState **pstate, const JsonbValue *jbval,
+					 bool isKey, bool unpackBinary)
 {
 	return *pstate == NULL
-				? pushSingleScalarJsonbValue(pstate, jbval)
-				: pushNestedScalarJsonbValue(pstate, jbval, isKey);
+			? pushSingleScalarJsonbValue(pstate, jbval, unpackBinary)
+			: pushNestedScalarJsonbValue(pstate, jbval, isKey, unpackBinary);
 
 }
 
@@ -2262,6 +2263,6 @@ jsonbContainerOps =
 	jsonbFindValueInArray,
 	jsonbGetArrayElement,
 	NULL,
-	JsonbToCString,
+	JsonbToCStringRaw,
 };
 
