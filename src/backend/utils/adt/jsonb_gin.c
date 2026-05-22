@@ -69,6 +69,7 @@
 #include "utils/jsonb.h"
 #include "utils/jsonpath.h"
 #include "utils/varlena.h"
+#include "utils/json_generic.h"
 
 typedef struct PathHashStack
 {

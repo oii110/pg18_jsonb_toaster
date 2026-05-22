@@ -21,9 +21,11 @@
 #include "utils/builtins.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
+#include "utils/json_generic.h"
 #include "utils/jsonfuncs.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
+#include "utils/datetime.h"
 
 typedef struct JsonbInState
 {
@@ -108,7 +110,7 @@ jsonb_out(PG_FUNCTION_ARGS)
 	Jsonb	   *jb = PG_GETARG_JSONB_P(0);
 	char	   *out;
 
-	out = JsonbToCString(NULL, JsonbRoot(jb), JsonbGetSize(jb));
+	out = JsonToCString(JsonbRoot(jb));
 
 	PG_RETURN_CSTRING(out);
 }
@@ -166,7 +168,7 @@ JsonbContainerTypeName(JsonbContainer *jbc)
 		return "object";
 	else
 	{
-		elog(ERROR, "invalid jsonb container type: 0x%08x", jbc->header);
+		elog(ERROR, "invalid jsonb container type");
 		return "unknown";
 	}
 }
@@ -242,7 +244,7 @@ jsonb_typeof(PG_FUNCTION_ARGS)
  * If escontext points to an ErrorSaveContext, errors are reported there
  * instead of being thrown.
  */
-static JsonbValue *
+JsonbValue *
 JsonValueFromCString(char *json, int len, bool unique_keys, Node *escontext)
 {
 	JsonLexContext lex;
@@ -353,9 +355,16 @@ jsonb_put_escaped_value(StringInfo out, JsonbValue *scalarVal)
 			escape_json_with_len(out, scalarVal->val.string.val, scalarVal->val.string.len);
 			break;
 		case jbvNumeric:
-			appendStringInfoString(out,
-								   DatumGetCString(DirectFunctionCall1(numeric_out,
-																	   PointerGetDatum(scalarVal->val.numeric))));
+			/* replace numeric NaN with string "NaN" */
+			if (numeric_is_nan(scalarVal->val.numeric))
+				appendBinaryStringInfo(out, "\"NaN\"", 5);
+			else
+			{
+				Datum		num = DirectFunctionCall1(numeric_out,
+													  PointerGetDatum(scalarVal->val.numeric));
+
+				appendStringInfoString(out, DatumGetCString(num));
+			}
 			break;
 		case jbvBool:
 			if (scalarVal->val.boolean)
@@ -363,6 +372,18 @@ jsonb_put_escaped_value(StringInfo out, JsonbValue *scalarVal)
 			else
 				appendBinaryStringInfo(out, "false", 5);
 			break;
+		case jbvDatetime:
+			{
+				char		buf[MAXDATELEN + 1];
+
+				JsonEncodeDateTime(buf,
+								   scalarVal->val.datetime.value,
+								   scalarVal->val.datetime.typid,
+								   &scalarVal->val.datetime.tz);
+				escape_json(out, buf);
+				break;
+			}
+		
 		default:
 			elog(ERROR, "unknown jsonb scalar type");
 	}
@@ -1039,7 +1060,8 @@ to_jsonb(PG_FUNCTION_ARGS)
 	json_categorize_type(val_type, true,
 						 &tcategory, &outfuncoid);
 
-    PG_RETURN_JSONB_P((Jsonb *) DatumGetPointer(datum_to_jsonb(val, tcategory, outfuncoid)));
+    //PG_RETURN_JSONB_P((Jsonb *) DatumGetPointer(datum_to_jsonb(val, tcategory, outfuncoid)));
+	PG_RETURN_DATUM(datum_to_jsonb(val, tcategory, outfuncoid));
 }
 
 /*
