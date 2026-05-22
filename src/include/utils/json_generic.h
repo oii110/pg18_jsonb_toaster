@@ -82,56 +82,33 @@ typedef struct Json
 
 #define JsonIsTemporary(json)		((json)->obj.isTemporary)
 
-
-#ifndef JSONXOID
-# define JSONXOID JSONBOID
-#endif
-
-#ifndef JsonxContainerOps
-# define JsonxContainerOps			(&jsonbContainerOps)
-#endif
-
 #define JsonFlattenToJsonbDatum(json) \
 		PointerGetDatum(JsonFlatten(json, JsonbEncode, &jsonbContainerOps))
 
 #undef JsonbPGetDatum
 #define JsonbPGetDatum(json)		JsonFlattenToJsonbDatum(json)
 
-#ifndef JsonxPGetDatum
-# define JsonxPGetDatum(json)		JsonbPGetDatum(json)
-#endif
-
-#define JsonGetDatum(json)			JsonxPGetDatum(json)
-
 #undef DatumGetJsonbP
 #define DatumGetJsonbP(datum)		DatumGetJson(datum, &jsonbContainerOps, NULL)
 #define DatumGetJsontP(datum)		DatumGetJson(datum, &jsontContainerOps, NULL)
-#define DatumGetJsonxP(datum)		DatumGetJson(datum, JsonxContainerOps, NULL)
-#define DatumGetJsonxTmp(datum,tmp)	DatumGetJson(datum, JsonxContainerOps, tmp)
-
 
 #undef DatumGetJsonbPCopy
 #define DatumGetJsonbPCopy(datum)	DatumGetJsonbP(PointerGetDatum(PG_DETOAST_DATUM_COPY(datum)))
 #define DatumGetJsontPCopy(datum)	DatumGetJsontP(PointerGetDatum(PG_DETOAST_DATUM_COPY(datum)))
-#define DatumGetJsonxPCopy(datum)	DatumGetJsonxP(PointerGetDatum(PG_DETOAST_DATUM_COPY(datum)))
 
 #undef PG_RETURN_JSONB_P
-#define PG_RETURN_JSONB_P(x)		PG_RETURN_DATUM(JsonGetDatum(x))
+#define PG_RETURN_JSONB_P(x)		PG_RETURN_DATUM(JsonbPGetDatum(x))
 #define PG_RETURN_JSONT_P(x)		PG_RETURN_DATUM(JsontPGetDatum(x))
 
-#define PG_GETARG_JSONX_TMP(n, tmp)	DatumGetJsonxTmp(PG_GETARG_DATUM(n), tmp)
-
-
 #undef	PG_GETARG_JSONB_P
-#define PG_GETARG_JSONB_P(n)		PG_GETARG_JSONX_TMP(n, alloca(sizeof(Json))) /* FIXME conditional alloca() */
-
+#define PG_GETARG_JSONB_P(n)		DatumGetJson(PG_GETARG_DATUM(n), &jsonbContainerOps, alloca(sizeof(Json))) /* FIXME conditional alloca() */
 #define PG_GETARG_JSONT_P(n)		DatumGetJsontP(PG_GETARG_DATUM(n))
 
 #define PG_FREE_IF_COPY_JSONB(json, n) JsonFree(json)
 
-
 #undef	PG_GETARG_JSONB_P_COPY
-#define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonxPCopy(PG_GETARG_DATUM(x))
+#define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
+
 
 #define JsonRoot(json)				(&(json)->root)
 #define JsonGetSize(json)			(JsonRoot(json)->len)
@@ -156,7 +133,9 @@ typedef struct Json
 #define JsonbValueToJsonb JsonValueToJsonb
 #else
 #define Jsonb Json
+
 #define JsonbContainer JsonContainer
+
 #define JsonbValueToJsonb JsonValueToJson
 
 #undef JB_ROOT_COUNT
@@ -232,8 +211,6 @@ extern Json *JsonCopyTemporary(Json *tmp);
 #define JsonContainerAlloc() \
 	((JsonContainerData *) palloc(sizeof(JsonContainerData)))
 
-
-
 extern JsonValue *JsonFindValueInContainer(JsonContainer *json, uint32 flags,
 										   JsonValue *key);
 
@@ -271,7 +248,6 @@ JsonGetNonTemporary(Json *json)
 	return JsonIsTemporary(json) ? JsonCopyTemporary(json) : json;
 }
 
-
 extern Json *JsonValueToJson(JsonValue *val);
 extern JsonValue *JsonToJsonValue(Json *json, JsonValue *jv);
 extern JsonValue *JsonValueUnpackBinary(const JsonValue *jbv);
@@ -293,7 +269,6 @@ extern bool JsonbDeepContains(JsonContainer *val, JsonContainer *mContained);
 /* jsonb.c support functions */
 extern JsonValue *JsonValueFromCString(char *json, int len, bool unique_keys, Node *escontext);
 
-
 extern char *JsonbToCStringRaw(StringInfo out, JsonContainer *in,
 			   int estimated_len);
 extern char *JsonbToCStringIndent(StringInfo out, JsonContainer *in,
@@ -306,7 +281,6 @@ extern char *JsonbToCStringIndent(StringInfo out, JsonContainer *in,
 
 #define JsonbToCString(out, in, estimated_len) \
 		JsonToCStringExt(out, in, estimated_len)
-
 
 extern bool JsonValueScalarEquals(const JsonValue *aScalar,
 								  const JsonValue *bScalar);
