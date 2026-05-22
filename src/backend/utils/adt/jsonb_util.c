@@ -642,7 +642,7 @@ fillJsonbValue(const JsonbContainer *container, int index,
 	{
 		Assert(JBE_ISCONTAINER(entry));
 		result->type = jbvBinary;
-		result->val.binary.data = palloc(sizeof(JsonContainerData));
+		result->val.binary.data = JsonContainerAlloc();
 		jsonbInitContainer((JsonContainerData *) result->val.binary.data,
 				/* Remove alignment padding from data pointer and length */
 						   (JsonbContainer *)(base_addr + INTALIGN(offset)),
@@ -2264,5 +2264,6 @@ jsonbContainerOps =
 	jsonbGetArrayElement,
 	NULL,
 	JsonbToCStringRaw,
+	JsonCopyFlat,
 };
 
