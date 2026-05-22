@@ -554,7 +554,8 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 				{
 					first = false;
 					if (v.type == jbvBinary)
-						JsonbToCString(out, v.val.binary.data, v.val.binary.len);
+					JsonbToCString(out, v.val.binary.data,
+									   v.val.binary.data->len);					
 					else
 					jsonb_put_escaped_value(out, &v);
 				}
@@ -578,8 +579,9 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 				if (!raw_scalar)
 					add_indent(out, use_indent, level);
 
-				if (v.type == jbvBinary)
-					JsonbToCString(out, v.val.binary.data, v.val.binary.len);
+					if (v.type == jbvBinary)
+					JsonbToCString(out, v.val.binary.data,
+								   v.val.binary.data->len);
 				else
 					jsonb_put_escaped_value(out, &v);
 				break;

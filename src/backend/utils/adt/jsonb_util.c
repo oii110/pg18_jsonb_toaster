@@ -135,7 +135,7 @@ JsonContainerFlatten(JsonContainer *jc, JsonValueEncoder encoder,
 	{
 		jbv.type = jbvBinary;
 		jbv.val.binary.data = jc;
-		jbv.val.binary.len = jc->len;
+
 		binary = &jbv;
 	}
 
@@ -648,7 +648,6 @@ fillJsonbValue(const JsonbContainer *container, int index,
 						   (JsonbContainer *)(base_addr + INTALIGN(offset)),
 						   getJsonbLength(container, index) -
 								(INTALIGN(offset) - offset));
-		result->val.binary.len = result->val.binary.data->len;
 	}
 }
 
