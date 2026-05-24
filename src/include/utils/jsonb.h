@@ -194,8 +194,8 @@ typedef struct JsonbIterator JsonbIterator;
 
 #define PG_GETARG
 
-#define JsonbRoot(jsonb)	(&(jsonb)->root)
-#define JsonbGetSize(jsonb)	VARSIZE(jsonb)
+// #define JsonbRoot(jsonb)	(&(jsonb)->root)
+// #define JsonbGetSize(jsonb)	VARSIZE(jsonb)
 
 #include "utils/json_generic.h"
 

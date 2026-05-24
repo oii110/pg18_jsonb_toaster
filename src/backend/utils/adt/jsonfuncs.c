@@ -874,7 +874,7 @@ jsonb_object_field(PG_FUNCTION_ARGS)
 									 VARSIZE_ANY_EXHDR(key),
 									 &vbuf);
 	if (v != NULL)
-		PG_RETURN_JSONB_P(JsonbValueToJsonb(v));
+		PG_RETURN_JSONB_VALUE_P(v);
 
 	PG_RETURN_NULL();
 }
@@ -955,7 +955,7 @@ jsonb_array_element(PG_FUNCTION_ARGS)
 
 	v = getIthJsonbValueFromContainer(JsonbRoot(jb), element);
 	if (v != NULL)
-		PG_RETURN_JSONB_P(JsonbValueToJsonb(v));
+		PG_RETURN_JSONB_VALUE_P(v);
 
 	PG_RETURN_NULL();
 }
@@ -1669,10 +1669,7 @@ jsonb_get_element(Jsonb *jb, Datum *path, int npath, bool *isnull, bool as_text)
 	}
 	else
 	{
-		Jsonb	   *res = JsonbValueToJsonb(jbvp);
-
-		/* not text mode - just hand back the jsonb */
-		PG_RETURN_JSONB_P(res);
+		PG_RETURN_JSONB_VALUE_P(jbvp);
 	}
 }
 
@@ -1696,7 +1693,7 @@ jsonb_set_element(Jsonb *jb, Datum *path, int path_len,
 
 	pfree(path_nulls);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 static void
@@ -2037,9 +2034,7 @@ each_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 			else
 			{
 				/* Not in text mode, just return the Jsonb */
-				Jsonb	   *val = JsonbValueToJsonb(&v);
-
-				values[1] = JsonbPGetDatum(val);
+				values[1] = JsonValueToJsonbDatum(&v);
 			}
 
 			tuplestore_putvalues(rsi->setResult, rsi->setDesc, values, nulls);
@@ -2276,9 +2271,7 @@ elements_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname,
 			else
 			{
 				/* Not in text mode, just return the Jsonb */
-				Jsonb	   *val = JsonbValueToJsonb(&v);
-
-				values[0] = JsonbPGetDatum(val);
+				values[0] = JsonValueToJsonbDatum(&v);
 			}
 
 			tuplestore_putvalues(rsi->setResult, rsi->setDesc, values, nulls);
@@ -3172,9 +3165,7 @@ populate_scalar(ScalarIOData *io, Oid typid, int32 typmod, JsValue *jsv,
 			str = pnstrdup(jbv->val.string.val, jbv->val.string.len);
 		else if (typid == JSONBOID)
 		{
-			Jsonb	   *jsonb = JsonbValueToJsonb(jbv); /* directly use jsonb */
-
-			return JsonbPGetDatum(jsonb);
+			return JsonValueToJsonbDatum(jbv); /* directly use jsonb */
 		}
 		/* convert jsonb to string for typio call */
 		else if (typid == JSONOID && jbv->type != jbvBinary)
@@ -4595,7 +4586,7 @@ jsonb_strip_nulls(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*
@@ -4650,7 +4641,7 @@ jsonb_concat(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 
@@ -4704,7 +4695,7 @@ jsonb_delete(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*
@@ -4790,7 +4781,7 @@ jsonb_delete_array(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*
@@ -4858,7 +4849,7 @@ jsonb_delete_idx(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*
@@ -4906,7 +4897,7 @@ jsonb_set(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 
@@ -5017,7 +5008,7 @@ jsonb_delete_path(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*
@@ -5062,7 +5053,7 @@ jsonb_insert(PG_FUNCTION_ARGS)
 
 	Assert(res != NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+	PG_RETURN_JSONB_VALUE_P(res);
 }
 
 /*

@@ -99,5 +99,6 @@ extern Datum jsonb_set_element(Jsonb *jb, Datum *path, int path_len,
 							   JsonbValue *newval);
 extern Datum jsonb_get_element(Jsonb *jb, Datum *path, int npath,
 							   bool *isnull, bool as_text);
+extern Datum to_jsonb_worker(Datum val, JsonTypeCategory tcategory, Oid outfuncoid);
 
 #endif

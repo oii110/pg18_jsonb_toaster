@@ -280,7 +280,7 @@ jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
     if (res == NULL)
         return (Datum) 0;         
 
-    PG_RETURN_JSONB_P(JsonbValueToJsonb(res));
+    PG_RETURN_JSONB_VALUE_P(res);
 }
 
 static JsonParseErrorType
@@ -578,7 +578,7 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 				if (!raw_scalar)
 					add_indent(out, use_indent, level);
 
-					if (v.type == jbvBinary)
+				if (v.type == jbvBinary)
 					JsonbToCString(out, v.val.binary.data,
 								   v.val.binary.data->len);
 				else
@@ -1071,13 +1071,9 @@ to_jsonb(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(datum_to_jsonb(val, tcategory, outfuncoid));
 }
 
-/*
- * Turn a Datum into jsonb.
- *
- * tcategory and outfuncoid are from a previous call to json_categorize_type.
- */
-Datum
-datum_to_jsonb(Datum val, JsonTypeCategory tcategory, Oid outfuncoid)
+
+static JsonbValue *
+to_jsonb_worker_internal(Datum val, JsonTypeCategory tcategory, Oid outfuncoid)
 {
 	JsonbInState result;
 
@@ -1086,11 +1082,23 @@ datum_to_jsonb(Datum val, JsonTypeCategory tcategory, Oid outfuncoid)
 	datum_to_jsonb_internal(val, false, &result, tcategory, outfuncoid,
 							false);
 
-	return JsonbPGetDatum(JsonbValueToJsonb(result.res));
+	return result.res;
 }
 
 Datum
-jsonb_build_object_worker(int nargs, const Datum *args, const bool *nulls, const Oid *types,
+datum_to_jsonb(Datum val, JsonTypeCategory tcategory, Oid outfuncoid)
+{
+	return JsonbPGetDatum(JsonbValueToJsonb(to_jsonb_worker_internal(val, tcategory, outfuncoid)));
+}
+
+Datum
+to_jsonb_worker(Datum val, JsonTypeCategory tcategory, Oid outfuncoid)
+{
+	return datum_to_jsonb(val, tcategory, outfuncoid);
+}
+
+static JsonbValue *
+jsonb_build_object_worker_internal(int nargs, const Datum *args, const bool *nulls, const Oid *types,
 						  bool absent_on_null, bool unique_keys)
 {
 	int			i;
@@ -1133,9 +1141,19 @@ jsonb_build_object_worker(int nargs, const Datum *args, const bool *nulls, const
 		add_jsonb(args[i + 1], nulls[i + 1], &result, types[i + 1], false);
 	}
 
-	result.res = pushJsonbValue(&result.parseState, WJB_END_OBJECT, NULL);
+	return pushJsonbValue(&result.parseState, WJB_END_OBJECT, NULL);
+}
 
-	return JsonbPGetDatum(JsonbValueToJsonb(result.res));
+Datum
+jsonb_build_object_worker(int nargs, const Datum *args, const bool *nulls, const Oid *types,
+						  bool absent_on_null, bool unique_keys)
+{
+	JsonbValue *res = jsonb_build_object_worker_internal(nargs, args,
+														 nulls, types,
+														 absent_on_null,
+														 unique_keys);
+
+	return JsonValueToJsonbDatum(res);
 }
 
 /*
@@ -1155,7 +1173,8 @@ jsonb_build_object(PG_FUNCTION_ARGS)
 	if (nargs < 0)
 		PG_RETURN_NULL();
 
-	PG_RETURN_DATUM(jsonb_build_object_worker(nargs, args, nulls, types, false, false));
+	PG_RETURN_JSONB_VALUE_P(
+		jsonb_build_object_worker_internal(nargs, args, nulls, types, false, false));
 }
 
 /*
@@ -1174,8 +1193,8 @@ jsonb_build_object_noargs(PG_FUNCTION_ARGS)
 	PG_RETURN_JSONB_P(JsonbValueToJsonb(result.res));
 }
 
-Datum
-jsonb_build_array_worker(int nargs, const Datum *args, const bool *nulls, const Oid *types,
+static JsonbValue *
+jsonb_build_array_worker_internal(int nargs, const Datum *args, const bool *nulls, const Oid *types,
 						 bool absent_on_null)
 {
 	int			i;
@@ -1193,10 +1212,20 @@ jsonb_build_array_worker(int nargs, const Datum *args, const bool *nulls, const 
 		add_jsonb(args[i], nulls[i], &result, types[i], false);
 	}
 
-	result.res = pushJsonbValue(&result.parseState, WJB_END_ARRAY, NULL);
-
-	return JsonbPGetDatum(JsonbValueToJsonb(result.res));
+	return pushJsonbValue(&result.parseState, WJB_END_ARRAY, NULL);
 }
+
+Datum
+jsonb_build_array_worker(int nargs, const Datum *args, const bool *nulls, const Oid *types,
+						 bool absent_on_null)
+{
+	JsonbValue *res = jsonb_build_array_worker_internal(nargs, args,
+														nulls, types,
+														absent_on_null);
+
+	return JsonValueToJsonbDatum(res);
+}
+
 
 /*
  * SQL function jsonb_build_array(variadic "any")
@@ -1215,7 +1244,8 @@ jsonb_build_array(PG_FUNCTION_ARGS)
 	if (nargs < 0)
 		PG_RETURN_NULL();
 
-	PG_RETURN_DATUM(jsonb_build_array_worker(nargs, args, nulls, types, false));
+	PG_RETURN_JSONB_VALUE_P(
+		jsonb_build_array_worker_internal(nargs, args, nulls, types, false));
 }
 
 
@@ -1232,7 +1262,7 @@ jsonb_build_array_noargs(PG_FUNCTION_ARGS)
 	(void) pushJsonbValue(&result.parseState, WJB_BEGIN_ARRAY, NULL);
 	result.res = pushJsonbValue(&result.parseState, WJB_END_ARRAY, NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(result.res));
+	PG_RETURN_JSONB_VALUE_P(result.res);
 }
 
 
@@ -1334,7 +1364,7 @@ jsonb_object(PG_FUNCTION_ARGS)
 close_object:
 	result.res = pushJsonbValue(&result.parseState, WJB_END_OBJECT, NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(result.res));
+	PG_RETURN_JSONB_VALUE_P(result.res);
 }
 
 /*
@@ -1426,7 +1456,7 @@ jsonb_object_two_arg(PG_FUNCTION_ARGS)
 close_object:
 	result.res = pushJsonbValue(&result.parseState, WJB_END_OBJECT, NULL);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(result.res));
+	PG_RETURN_JSONB_VALUE_P(result.res);
 }
 
 
@@ -1580,7 +1610,6 @@ jsonb_agg_finalfn(PG_FUNCTION_ARGS)
 {
 	JsonbAggState *arg;
 	JsonbInState result;
-	Jsonb	   *out;
 
 	/* cannot be called directly because of internal-type argument */
 	Assert(AggCheckCallContext(fcinfo, NULL));
@@ -1603,9 +1632,7 @@ jsonb_agg_finalfn(PG_FUNCTION_ARGS)
 	result.res = pushJsonbValue(&result.parseState,
 								WJB_END_ARRAY, NULL);
 
-	out = JsonbValueToJsonb(result.res);
-
-	PG_RETURN_JSONB_P(out);
+	PG_RETURN_JSONB_VALUE_P(result.res);
 }
 
 static Datum
@@ -1870,7 +1897,6 @@ jsonb_object_agg_finalfn(PG_FUNCTION_ARGS)
 {
 	JsonbAggState *arg;
 	JsonbInState result;
-	Jsonb	   *out;
 
 	/* cannot be called directly because of internal-type argument */
 	Assert(AggCheckCallContext(fcinfo, NULL));
@@ -1894,9 +1920,7 @@ jsonb_object_agg_finalfn(PG_FUNCTION_ARGS)
 	result.res = pushJsonbValue(&result.parseState,
 								WJB_END_OBJECT, NULL);
 
-	out = JsonbValueToJsonb(result.res);
-
-	PG_RETURN_JSONB_P(out);
+	PG_RETURN_JSONB_VALUE_P(result.res);
 }
 
 
