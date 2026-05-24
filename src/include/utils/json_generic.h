@@ -28,10 +28,10 @@ typedef struct JsonContainerOps JsonContainerOps;
 typedef struct JsonContainerData
 {
 	JsonContainerOps   *ops;
-	void			   *data;
 	int					len;
 	int					size;
 	JsonbValueType		type;
+	void			   *_data[FLEXIBLE_ARRAY_MEMBER];
 } JsonContainerData;
 
 typedef const JsonContainerData JsonContainer;
@@ -51,6 +51,7 @@ struct JsonIteratorData
 
 struct JsonContainerOps
 {
+	int				data_size;
 	void			(*init)(JsonContainerData *jc, Datum value);
 	JsonIterator   *(*iteratorInit)(JsonContainer *jc);
 	JsonValue	   *(*findKeyInObject)(JsonContainer *object,
@@ -75,13 +76,14 @@ typedef struct CompressedObject
 typedef struct Json
 {
 	CompressedObject obj;
-	JsonContainerData root;
 	bool		is_json;		/* json or jsonb */
+	JsonContainerData root;
 } Json;
 
 typedef Json Jsonb;
 typedef JsonContainer JsonbContainer;
 
+#define JsonContainerDataPtr(jc)	((jc)->_data[0])
 
 #define JsonIsTemporary(json)		((json)->obj.isTemporary)
 
@@ -103,7 +105,7 @@ typedef JsonContainer JsonbContainer;
 #define PG_RETURN_JSONB_P(x)		PG_RETURN_DATUM(JsonbPGetDatum(x))
 #define PG_RETURN_JSONB_VALUE_P(x)	PG_RETURN_DATUM(JsonValueToJsonbDatum(x))
 
-#define PG_GETARG_JSONB_P(n)		DatumGetJson(PG_GETARG_DATUM(n), &jsonbContainerOps, alloca(sizeof(Json))) /* FIXME conditional alloca() */
+#define PG_GETARG_JSONB_P(n)		DatumGetJson(PG_GETARG_DATUM(n), &jsonbContainerOps, alloca(offsetof(Json, root._data) + sizeof(void *)))
 #define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
 
 #define PG_FREE_IF_COPY_JSONB(json, n) JsonFree(json)
@@ -192,8 +194,15 @@ extern Json *DatumGetJson(Datum val, JsonContainerOps *ops, Json *tmp);
 extern void JsonFree(Json *json);
 extern Json *JsonCopyTemporary(Json *tmp);
 
-#define JsonContainerAlloc() \
-	((JsonContainerData *) palloc(sizeof(JsonContainerData)))
+#define JsonAllocSize(data_size) \
+	(offsetof(Json, root._data) + (data_size))
+
+#define JsonContainerAllocSize(data_size) \
+	(offsetof(JsonContainerData, _data) + (data_size))
+
+#define JsonContainerAlloc(ops) \
+	((JsonContainerData *) palloc(JsonContainerAllocSize((ops)->data_size)))
+
 
 extern JsonValue *JsonFindValueInContainer(JsonContainer *json, uint32 flags,
 										   JsonValue *key);

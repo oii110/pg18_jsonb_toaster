@@ -120,10 +120,12 @@ JsonContainerFlatten(JsonContainer *jc, JsonValueEncoder encoder,
 
 	if (jc->ops == ops)
 	{
-		int		size = jc->len;
-		void   *out = palloc(VARHDRSZ + size);
+		int			size = jc->len;
+		void       *out = palloc(VARHDRSZ + size);
+
 		SET_VARSIZE(out, VARHDRSZ + size);
-		memcpy(VARDATA(out), jc->data, size);
+		memcpy(VARDATA(out), JsonContainerDataPtr(jc), size);
+
 		return out;
 	}
 
@@ -454,7 +456,7 @@ JsonbArrayIteratorGetIth(JsonbArrayIterator *it, uint32 i)
 static JsonbValue *
 jsonbFindValueInArray(JsonContainer *jsc, const JsonbValue *key)
 {
-	const JsonbContainerHeader *container = jsc->data;
+	const JsonbContainerHeader *container = JsonContainerDataPtr(jsc);
 	JsonbArrayIterator	it;
 	JsonbValue		   *result = palloc(sizeof(JsonbValue));
 
@@ -510,7 +512,7 @@ static JsonbValue *
 jsonbFindKeyInObject(JsonContainer *jsc, const char *keyVal, int keyLen,
 					 JsonValue *res)
 {
-	const JsonbContainerHeader *container = jsc->data;
+	const JsonbContainerHeader *container = JsonContainerDataPtr(jsc);
 	const JEntry *children = container->children;
 	int			count = JsonContainerSize(jsc);
 	char	   *baseAddr;
@@ -586,7 +588,7 @@ jsonbGetArrayElement(JsonContainer *jsc, uint32 i)
 	if (!JsonContainerIsArray(jsc))
 		elog(ERROR, "not a jsonb array");
 
-	JsonbArrayIteratorInit(&it, jsc->data);
+	JsonbArrayIteratorInit(&it, JsonContainerDataPtr(jsc));
 
 	return JsonbArrayIteratorGetIth(&it, i);
 }
@@ -640,7 +642,7 @@ fillJsonbValue(const JsonbContainerHeader *container, int index,
 	{
 		Assert(JBE_ISCONTAINER(entry));
 		result->type = jbvBinary;
-		result->val.binary.data = JsonContainerAlloc();
+		result->val.binary.data = JsonContainerAlloc(&jsonbContainerOps);
 		jsonbInitContainer((JsonContainerData *) result->val.binary.data,
 				/* Remove alignment padding from data pointer and length */
 						   (JsonbContainerHeader *)(base_addr + INTALIGN(offset)),
@@ -1218,7 +1220,7 @@ iteratorFromContainer(JsonContainer *container, jsonbIterator *parent)
 static JsonIterator *
 jsonbIteratorInit(JsonContainer *cont)
 {
-	const JsonbContainerHeader *container = cont->data;
+	const JsonbContainerHeader *container = JsonContainerDataPtr(cont);
 	jsonbIterator *it;
 
 	it = palloc0(sizeof(jsonbIterator));
@@ -2089,7 +2091,7 @@ convertJsonbBinary(StringInfo buffer, JEntry *pheader, const JsonbValue *val,
 	{
 		int base_offset = buffer->len;
 		padBufferToInt(buffer);
-		appendToBuffer(buffer, jc->data, jc->len);
+		appendToBuffer(buffer, JsonContainerDataPtr(jc), jc->len);
 		*pheader = JENTRY_ISCONTAINER | (buffer->len - base_offset);
 	}
 	else
@@ -2230,7 +2232,7 @@ static void
 jsonbInitContainer(JsonContainerData *jc, JsonbContainerHeader *jbc, int len)
 {
 	jc->ops = &jsonbContainerOps;
-	jc->data = jbc;
+	JsonContainerDataPtr(jc) = jbc;
 	jc->len = len;
 	jc->size = jbc->header & JBC_CMASK;
 	jc->type = jbc->header & JBC_FOBJECT ? jbvObject :
@@ -2248,6 +2250,7 @@ jsonbInit(JsonContainerData *jc, Datum value)
 JsonContainerOps
 jsonbContainerOps =
 {
+	sizeof(JsonbContainerHeader *),
 	jsonbInit,
 	jsonbIteratorInit,
 	jsonbFindKeyInObject,
