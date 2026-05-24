@@ -138,17 +138,6 @@ JsonFree(Json *json)
 		pfree(json);
 }
 
-Json *
-JsonCopyTemporary(Json *tmp)
-{
-	Json *json = (Json *) palloc(sizeof(Json));
-
-	memcpy(json, tmp, sizeof(Json));
-	tmp->obj.freeValue = false;
-	json->obj.isTemporary = false;
-
-	return json;
-}
 
 Json *
 JsonValueToJson(JsonValue *val)
