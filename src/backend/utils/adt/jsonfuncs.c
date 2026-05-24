@@ -34,7 +34,6 @@
 #include "utils/hsearch.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
-#include "utils/json_generic.h"
 #include "utils/jsonfuncs.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -3392,7 +3391,6 @@ json_populate_type(Datum json_val, Oid json_type,
 			/* fill binary jsonb value pointing to jb */
 			jbv.type = jbvBinary;
 			jbv.val.binary.data = &jsonb->root;
-		//	jbv.val.binary.len = VARSIZE(jsonb) - VARHDRSZ;
 		}
 	}
 

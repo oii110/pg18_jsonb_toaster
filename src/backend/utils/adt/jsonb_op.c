@@ -16,7 +16,6 @@
 #include "catalog/pg_type.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
-#include "utils/json_generic.h"
 
 
 Datum

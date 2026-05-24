@@ -21,7 +21,6 @@
 #include "utils/builtins.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
-#include "utils/json_generic.h"
 #include "utils/jsonfuncs.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
