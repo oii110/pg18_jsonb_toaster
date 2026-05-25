@@ -2137,6 +2137,15 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"jsonb_partial_detoast", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use partial deTOASTing for jsonb."),
+		},
+		&jsonb_partial_detoast,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"event_triggers", PGC_SUSET, CLIENT_CONN_STATEMENT,
 			gettext_noop("Enables event triggers."),
 			gettext_noop("When enabled, event triggers will fire for all applicable statements."),

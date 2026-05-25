@@ -5283,6 +5283,7 @@ setPathObject(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 			  int path_len, JsonbParseState **st, int level,
 			  JsonbValue *newval, int op_type)
 {
+	text	   *pathelem = NULL;
 	JsonbValue	k,
 				v;
 	JsonbIteratorToken r;
@@ -5474,7 +5475,7 @@ setPathArray(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 				 * otherwise it should be deleted or replaced
 				 */
 				if (op_type & (JB_PATH_INSERT_AFTER | JB_PATH_INSERT_BEFORE))
-					(void) pushJsonbValueExt(st, WJB_ELEM, newval, false);
+					(void) pushJsonbValueExt(st, r, &v, false);
 
 				if (op_type & (JB_PATH_INSERT_AFTER | JB_PATH_REPLACE))
 					(void) pushJsonbValueExt(st, WJB_ELEM, newval, false);

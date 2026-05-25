@@ -238,5 +238,6 @@ extern Datum jsonb_build_array_worker(int nargs, const Datum *args, const bool *
 									  const Oid *types, bool absent_on_null);
 extern bool jsonb_sort_field_values;		/* GUC */
 extern bool jsonb_partial_decompression;	/* GUC */
+extern bool jsonb_partial_detoast;			/* GUC */
 
 #endif							/* __JSONB_H__ */

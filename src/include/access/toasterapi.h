@@ -12,7 +12,7 @@
 #ifndef TOASTERAPI_H
 #define TOASTERAPI_H
 
-#include "access/genam.h"
+#include "access/detoast.h"
 
 
 /*

@@ -47,3 +47,4 @@ lib*.pc
 /src/test/regress/regression.out
 /full_series.patch
 /diff.txt
+/results.csv
