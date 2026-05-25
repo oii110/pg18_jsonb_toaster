@@ -29,8 +29,6 @@
 #include "utils/memutils.h"
 #include "utils/varlena.h"
 
-#define JSONB_SORTED_VALUES 1
-
 
 /*
  * Maximum number of elements in an array (or key/value pairs in an object).
@@ -139,6 +137,7 @@ static JsonbValue *fillCompressedJsonbValue(CompressedJsonb *cjb,
 											int index, char *base_addr,
 											uint32 offset, JsonValue *result);
 static JsonbContainer *jsonbzDecompress(JsonContainer *jc);
+bool jsonb_sort_field_values = true;		/* GUC */
 bool jsonb_partial_decompression = true;	/*GUC */
 
 
@@ -2058,7 +2057,7 @@ convertJsonbObject(StringInfo buffer, JEntry *header, const JsonbValue *val, int
 	uint32		containerheader;
 	int			nPairs = val->val.object.nPairs;
 	int			reserved_size;
-	bool		sorted_values = JSONB_SORTED_VALUES && nPairs > 1;
+	bool		sorted_values = jsonb_sort_field_values && nPairs > 1;
 	struct
 	{
 		int			size;
