@@ -112,7 +112,7 @@ typedef JsonContainer JsonbContainer;
 #else
 #define PG_GETARG_JSONB_P(n)		DatumGetJsonbP(PG_GETARG_DATUM(n), alloca(sizeof(Json)), false) /* FIXME conditional alloca() */
 #endif
-#define PG_GETARG_JSONB_PC(n)		DatumGetJsonbPC(PG_GETARG_DATUM(n), alloca(sizeof(Json)), false) /* FIXME conditional alloca() */
+#define PG_GETARG_JSONB_PC(n)		DatumGetJsonbPC(PG_GETARG_DATUM(n), alloca(JsonAllocSize(16)) /* FIXME sizeof CompressedJsonb */, false)
 #define PG_GETARG_JSONB_P_COPY(n)	DatumGetJson(PointerGetDatum(PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(n))), &jsonbContainerOps, NULL)
 #define PG_FREE_IF_COPY_JSONB(json, n) JsonFree(json)
 
