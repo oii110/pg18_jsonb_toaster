@@ -105,7 +105,7 @@ typedef JsonContainer JsonbContainer;
 #define PG_RETURN_JSONB_P(x)		PG_RETURN_DATUM(JsonbPGetDatum(x))
 #define PG_RETURN_JSONB_VALUE_P(x)	PG_RETURN_DATUM(JsonValueToJsonbDatum(x))
 
-#define PG_GETARG_JSONB_P(n)		DatumGetJson(PG_GETARG_DATUM(n), &jsonbContainerOps, alloca(offsetof(Json, root._data) + sizeof(void *)))
+#define PG_GETARG_JSONB_P(n)		DatumGetJson(PG_GETARG_DATUM(n), &jsonbContainerOps, NULL)
 #define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
 
 #define PG_FREE_IF_COPY_JSONB(json, n) JsonFree(json)
@@ -262,7 +262,7 @@ extern char *JsonbToCStringRaw(StringInfo out, JsonContainer *in,
 extern char *JsonbToCStringIndent(StringInfo out, JsonContainer *in,
 					 int estimated_len);
 
-#define JsonToCString(jc)	JsonToCStringExt(NULL, jc, (jc)->len)
+#define JsonToCString(jc, buf)	((jc)->ops->toString(buf, jc, (jc)->len))
 
 #define JsonToCStringExt(out, in, estimated_len) \
 	((*(in)->ops->toString)(out, in, estimated_len))
