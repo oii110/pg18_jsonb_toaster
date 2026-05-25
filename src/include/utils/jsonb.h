@@ -236,5 +236,6 @@ extern Datum jsonb_build_object_worker(int nargs, const Datum *args, const bool 
 									   bool unique_keys);
 extern Datum jsonb_build_array_worker(int nargs, const Datum *args, const bool *nulls,
 									  const Oid *types, bool absent_on_null);
+extern bool jsonb_partial_decompression;	/* GUC */
 
 #endif							/* __JSONB_H__ */

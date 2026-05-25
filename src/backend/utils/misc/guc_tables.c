@@ -96,6 +96,7 @@
 #include "utils/guc_hooks.h"
 #include "utils/guc_tables.h"
 #include "utils/inval.h"
+#include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/plancache.h"
@@ -2112,6 +2113,16 @@ struct config_bool ConfigureNamesBool[] =
 		},
 		&wal_receiver_create_temp_slot,
 		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"jsonb_partial_decompression", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use partial pglz decompression for jsonb."),
+			NULL
+		},
+		&jsonb_partial_decompression,
+		true,
 		NULL, NULL, NULL
 	},
 
