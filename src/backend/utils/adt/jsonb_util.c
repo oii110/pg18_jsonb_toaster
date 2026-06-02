@@ -2657,6 +2657,7 @@ jsonbzInitContainer(JsonContainerData *jc, CompressedJsonb *cjb, int len)
 
 	jc->ops = &jsonbzContainerOps;
 	jc->len = len;
+	jc->toasterid = InvalidOid;
 	jsonbInitContainerFromHeader(jc, jbc);
 }
 
@@ -3041,6 +3042,7 @@ jsonbzContainerOps =
 	JsonbToCStringRaw,
 	JsonCopyFlat,	// FIXME
 	jsonbzFree,
+	NULL
 };
 
 Json *
