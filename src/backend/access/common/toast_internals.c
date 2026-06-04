@@ -1152,22 +1152,12 @@ toast_extract_chunk_fields(Relation toastrel, TupleDesc toasttupDesc,
  * Initialize fetch datum iterator.
  * ----------
  */
-FetchDatumIterator
-create_fetch_datum_iterator(struct varlena *attr)
+static void
+create_fetch_datum_iterator_scan(FetchDatumIterator iter)
 {
 	int			validIndex;
-	FetchDatumIterator iter;
 
-	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
-		elog(ERROR, "create_fetch_datum_iterator shouldn't be called for non-ondisk datums");
-
-	iter = (FetchDatumIterator) palloc0(sizeof(FetchDatumIteratorData));
-
-	/* Must copy to access aligned fields */
-	VARATT_EXTERNAL_GET_POINTER(iter->toast_pointer, attr);
-
-	iter->ressize = VARATT_EXTERNAL_GET_EXTSIZE(iter->toast_pointer);
-	iter->numchunks = ((iter->ressize - 1) / TOAST_MAX_CHUNK_SIZE) + 1;
+	MemoryContext oldcxt = MemoryContextSwitchTo(iter->mcxt);
 
 	/*
 	 * Open the toast relation and its indexes
@@ -1200,6 +1190,33 @@ create_fetch_datum_iterator(struct varlena *attr)
 	iter->toastscan = systable_beginscan_ordered(iter->toastrel, iter->toastidxs[validIndex],
 												 &iter->snapshot, 1, &iter->toastkey);
 
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/* ----------
+ * create_fetch_datum_iterator -
+ *
+ * Initialize fetch datum iterator.
+ * ----------
+ */
+FetchDatumIterator
+create_fetch_datum_iterator(struct varlena *attr)
+{
+	FetchDatumIterator iter;
+
+	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
+		elog(ERROR, "create_fetch_datum_iterator shouldn't be called for non-ondisk datums");
+
+	iter = (FetchDatumIterator) palloc0(sizeof(FetchDatumIteratorData));
+
+	iter->mcxt = CurrentMemoryContext;
+
+	/* Must copy to access aligned fields */
+	VARATT_EXTERNAL_GET_POINTER(iter->toast_pointer, attr);
+
+	iter->ressize = VARATT_EXTERNAL_GET_EXTSIZE(iter->toast_pointer);
+	iter->numchunks = ((iter->ressize - 1) / TOAST_MAX_CHUNK_SIZE) + 1;
+
 	iter->buf = create_toast_buffer(iter->ressize + VARHDRSZ,
 									VARATT_EXTERNAL_IS_COMPRESSED(iter->toast_pointer));
 
@@ -1209,13 +1226,14 @@ create_fetch_datum_iterator(struct varlena *attr)
 	return iter;
 }
 
+
 void
 free_fetch_datum_iterator(FetchDatumIterator iter)
 {
 	if (iter == NULL)
 		return;
 
-	if (!iter->done)
+	if (!iter->done && iter->toastscan)
 	{
 		systable_endscan_ordered(iter->toastscan);
 		toast_close_indexes(iter->toastidxs, iter->num_indexes, AccessShareLock);
@@ -1246,6 +1264,9 @@ fetch_datum_iterate(FetchDatumIterator iter)
 	int32		chunksize;
 
 	Assert(iter != NULL && !iter->done);
+		
+	if (!iter->toastscan)
+		create_fetch_datum_iterator_scan(iter);
 
 	ttup = systable_getnext_ordered(iter->toastscan, ForwardScanDirection);
 	if (ttup == NULL)
@@ -1355,8 +1376,9 @@ ToastBuffer *
 create_toast_buffer(int32 size, bool compressed)
 {
 	ToastBuffer *buf = (ToastBuffer *) palloc0(sizeof(ToastBuffer));
-	buf->buf = (const char *) palloc0(size);
-	if (compressed) {
+	buf->buf = (const char *) palloc(size);
+	if (compressed)
+	{
 		SET_VARSIZE_COMPRESSED(buf->buf, size);
 		/*
 		 * Note the constraint buf->position <= buf->limit may be broken
@@ -1401,6 +1423,8 @@ free_toast_buffer(ToastBuffer *buf)
  * current chunk.
  * ----------
  */
+
+#if 0
 void
 pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
 						DetoastIterator iter, unsigned char *destend)
@@ -1423,6 +1447,31 @@ pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
 	dp = (unsigned char *) dest->limit;
 	if (destend < (unsigned char *) dest->capacity)
 		destend = (unsigned char *) dest->capacity;
+
+		if (iter->len)
+	{
+		int32		len = iter->len;
+		int32		off = iter->off;
+		int32		copylen = Min(len, destend - dp);
+		int32		remlen = len - copylen;
+
+		while (copylen--)
+		{
+			*dp = dp[-off];
+			dp++;
+		}
+
+		iter->len = remlen;
+
+		if (dp >= destend)
+		{
+			dest->limit = (char *) dp;
+			return;
+		}
+
+		Assert(remlen == 0);
+	}
+
 
 	while (sp < srcend && dp < destend)
 	{
@@ -1461,6 +1510,8 @@ pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
 				 */
 				int32		len;
 				int32		off;
+				int32		copylen;
+
 
 				len = (sp[0] & 0x0f) + 3;
 				off = ((sp[0] & 0xf0) << 4) | sp[1];
@@ -1474,17 +1525,21 @@ pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
 				 * areas could overlap; to prevent possible uncertainty, we
 				 * copy only non-overlapping regions.
 				 */
-				len = Min(len, destend - dp);
-				while (off < len)
+				copylen = Min(len, destend - dp);
+				iter->len = len - copylen;
+
+				while (off < copylen)
 				{
 					/* see comments in common/pg_lzcompress.c */
 					memcpy(dp, dp - off, off);
-					len -= off;
+					copylen -= off;
 					dp += off;
 					off += off;
 				}
-				memcpy(dp, dp - off, len);
-				dp += len;
+				memcpy(dp, dp - off, copylen);
+				dp += copylen;
+
+				iter->off = off;
 			}
 			else
 			{
@@ -1508,3 +1563,4 @@ pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
 	source->position = (char *) sp;
 	dest->limit = (char *) dp;
 }
+#endif

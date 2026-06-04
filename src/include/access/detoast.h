@@ -47,6 +47,7 @@ do { \
 #include "postgres.h"
 #include "access/genam.h"
 #include "access/toasterapi.h"
+#include "access/toast_compression.h"
 
 /*
  * TOAST buffer is a producer consumer buffer.
@@ -78,10 +79,11 @@ typedef struct FetchDatumIteratorData
 	ToastBuffer	*buf;
 	Relation	toastrel;
 	Relation	*toastidxs;
+	MemoryContext mcxt;
 	SysScanDesc	toastscan;
 	ScanKeyData	toastkey;
 	SnapshotData			snapshot;
-	struct varatt_external	toast_pointer;
+	struct varatt_external toast_pointer;
 	int32		ressize;
 	int32		nextidx;
 	int32		numchunks;
@@ -91,20 +93,15 @@ typedef struct FetchDatumIteratorData
 
 typedef struct FetchDatumIteratorData *FetchDatumIterator;
 
-/*
- * If "ctrlc" field in iterator is equal to INVALID_CTRLC, it means that
- * the field is invalid and need to read the control byte from the
- * source buffer in the next iteration, see pglz_decompress_iterate().
- */
-#define INVALID_CTRLC 8
+
 
 typedef struct DetoastIteratorData
 {
 	ToastBuffer 		*buf;
 	FetchDatumIterator	fetch_datum_iterator;
-	unsigned char		ctrl;
-	int					ctrlc;
 	int					nrefs;
+	void			   *decompression_state;
+	ToastCompressionId	compression_method;
 	bool				compressed;		/* toast value is compressed? */
 	bool				done;
 }			DetoastIteratorData;
@@ -116,8 +113,11 @@ extern void free_fetch_datum_iterator(FetchDatumIterator iter);
 extern void fetch_datum_iterate(FetchDatumIterator iter);
 extern ToastBuffer *create_toast_buffer(int32 size, bool compressed);
 extern void free_toast_buffer(ToastBuffer *buf);
+extern void toast_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
+									 DetoastIterator iter, const char *destend);
 extern void pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
-									DetoastIterator iter, unsigned char *destend);
+									DetoastIterator iter, char *destend);
+
 
 /* ----------
  * create_detoast_iterator -
@@ -156,20 +156,20 @@ detoast_iterate(DetoastIterator detoast_iter, const char *destend)
 	if (!detoast_iter->compressed)
 		destend = NULL;
 
-	if (destend)
+	if (1 && destend)
 	{
 		const char *srcend = (const char *)
 			(fetch_iter->buf->limit == fetch_iter->buf->capacity ?
 			fetch_iter->buf->limit : fetch_iter->buf->limit - 4);
 
-		if (fetch_iter->buf->position >= srcend)
+		if (fetch_iter->buf->position >= srcend && !fetch_iter->done)
 			fetch_datum_iterate(fetch_iter);
 	}
-	else
+	else if (!fetch_iter->done)
 		fetch_datum_iterate(fetch_iter);
 
 	if (detoast_iter->compressed)
-		pglz_decompress_iterate(fetch_iter->buf, detoast_iter->buf, detoast_iter, (unsigned char *) destend);
+		toast_decompress_iterate(fetch_iter->buf, detoast_iter->buf, detoast_iter, destend);
 
 	if (detoast_iter->buf->limit == detoast_iter->buf->capacity)
 		detoast_iter->done = true;
