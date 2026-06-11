@@ -2382,6 +2382,9 @@ convertJsonbBinary(StringInfo buffer, JEntry *pheader, const JsonbValue *val,
 		appendToBuffer(buffer, (void *) jbc, jc->len);
 		*pheader = JENTRY_ISCONTAINER | (buffer->len - base_offset);
 	}
+	// else if (jc->ops == &jsonbContainerOps && !JsonContainerIsScalar(jc))
+	// 	convertJsonbValue(buffer, pheader,
+	// 					  (const JsonValue *) JsonContainerDataPtr(jc), level);
 	else
 		convertJsonbValue(buffer, pheader, JsonValueUnpackBinary(val), level);
 }
