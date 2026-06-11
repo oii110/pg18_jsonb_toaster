@@ -48,3 +48,10 @@ lib*.pc
 /full_series.patch
 /diff.txt
 /results.csv
+/all_diff.txt
+/load_imdb.sql
+/name.basics.tsv
+/title.basics.tsv
+/title.principals.tsv
+/title.ratings.tsv
+/toaster.diff
