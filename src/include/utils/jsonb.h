@@ -15,6 +15,8 @@
 #include "lib/stringinfo.h"
 #include "utils/array.h"
 #include "utils/numeric.h"
+#include "access/detoast.h"
+
 
 
 /* Tokens used when sequentially processing a jsonb value */
@@ -242,5 +244,7 @@ extern bool jsonb_partial_detoast;			/* GUC */
 
 extern void jsonbInitIterators(void);
 extern void jsonbFreeIterators(void);
+extern MemoryContext jsonbGetIteratorContext(void);
+extern void jsonbRegisterIterator(GenericDetoastIterator iter);
 
 #endif							/* __JSONB_H__ */
