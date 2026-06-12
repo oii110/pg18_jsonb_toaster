@@ -172,4 +172,8 @@ typedef struct CompressedJsonb
 } CompressedJsonb;
 
 #define jsonbzGetCompressedJsonb(jc) ((CompressedJsonb *) &(jc)->_data)
+
+typedef struct JsonContainerData JsonContainerData;
+typedef const JsonContainerData JsonContainer;
+extern JsonbContainerHeader *jsonbzDecompress(JsonContainer *jc);
 #endif							/* __JSONB_INTERNALS_H__ */
