@@ -251,5 +251,7 @@ extern MemoryContext jsonbGetIteratorContext(void);
 # define jsonbFreeIterators() ((void) 0)
 #endif
 extern void jsonbRegisterIterator(GenericDetoastIterator iter);
+extern void **jsonb_iter_cache;
+extern MemoryContext jsonb_iter_cache_mcxt;
 
 #endif							/* __JSONB_H__ */
