@@ -17,6 +17,7 @@
 #define JSONB_UTIL_C
 
 #include "access/detoast.h"
+#include "utils/guc.h"
 #include "access/heaptoast.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -3310,9 +3311,8 @@ jsonb_toaster_vtable(Datum toast_ptr)
 	return routine;
 }
 
-static void
-jsonb_toaster_init(Relation rel, Datum reloptions, LOCKMODE lockmode,
-				   bool check, Oid OIDOldToast)
+static void 
+jsonb_toaster_init(Relation rel, Oid toastoid, Oid toastindexoid, Datum reloptions, LOCKMODE lockmode, bool check, Oid OIDOldToast)
 {
 	(void) create_toast_table(rel, InvalidOid, InvalidOid, reloptions,
 							  lockmode, check, OIDOldToast);
