@@ -17,7 +17,16 @@
 #include "common/jsonapi.h"
 #include "nodes/nodes.h"
 #include "utils/jsonb.h"
-
+/* Operations available for setPath */
+#define JB_PATH_CREATE					0x0001
+#define JB_PATH_DELETE					0x0002
+#define JB_PATH_REPLACE					0x0004
+#define JB_PATH_INSERT_BEFORE			0x0008
+#define JB_PATH_INSERT_AFTER			0x0010
+#define JB_PATH_CREATE_OR_INSERT \
+	(JB_PATH_INSERT_BEFORE | JB_PATH_INSERT_AFTER | JB_PATH_CREATE)
+#define JB_PATH_FILL_GAPS				0x0020
+#define JB_PATH_CONSISTENT_POSITION		0x0040
 /*
  * Flag types for iterate_json(b)_values to specify what elements from a
  * json(b) document we want to iterate.
@@ -100,5 +109,8 @@ extern Datum jsonb_set_element(Jsonb *jb, Datum *path, int path_len,
 extern Datum jsonb_get_element(Jsonb *jb, Datum *path, int npath,
 							   bool *isnull, bool as_text);
 extern Datum to_jsonb_worker(Datum val, JsonTypeCategory tcategory, Oid outfuncoid);
+extern int JsonGetPathArrayIndex(Datum *path_elems, bool *path_nulls, int path_len,
+								 int level,  uint32 nelems, int op_type);
+
 
 #endif

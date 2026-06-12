@@ -2129,7 +2129,8 @@ struct config_bool ConfigureNamesBool[] =
 	{
 		{"jsonb_partial_decompression", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Use partial pglz decompression for jsonb."),
-			NULL
+			NULL,
+			GUC_NOT_IN_SAMPLE
 		},
 		&jsonb_partial_decompression,
 		true,
@@ -2139,6 +2140,8 @@ struct config_bool ConfigureNamesBool[] =
 	{
 		{"jsonb_partial_detoast", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Use partial deTOASTing for jsonb."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
 		},
 		&jsonb_partial_detoast,
 		true,
