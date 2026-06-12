@@ -161,5 +161,15 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	JsonbContainerHeader root;
 } JsonbDatum;
+typedef struct CompressedJsonb
+{
+#ifdef NO_JSONB_DETOAST_ITERATOR
+	CompressedDatum *datum;
+#else
+	DetoastIterator iter;
+#endif
+	int			offset;
+} CompressedJsonb;
 
+#define jsonbzGetCompressedJsonb(jc) ((CompressedJsonb *) &(jc)->_data)
 #endif							/* __JSONB_INTERNALS_H__ */
