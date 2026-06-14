@@ -96,6 +96,7 @@
 #include "utils/guc_hooks.h"
 #include "utils/guc_tables.h"
 #include "utils/inval.h"
+#include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/plancache.h"
@@ -2112,6 +2113,38 @@ struct config_bool ConfigureNamesBool[] =
 		},
 		&wal_receiver_create_temp_slot,
 		false,
+		NULL, NULL, NULL
+	},
+
+
+	{
+		{"jsonb_sort_field_values", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use special binary jsonb format for objects when their field values sorted by length."),
+		},
+		&jsonb_sort_field_values,
+		true,
+		NULL, NULL, NULL
+	},
+	
+	{
+		{"jsonb_partial_decompression", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use partial pglz decompression for jsonb."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&jsonb_partial_decompression,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"jsonb_partial_detoast", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use partial deTOASTing for jsonb."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&jsonb_partial_detoast,
+		true,
 		NULL, NULL, NULL
 	},
 

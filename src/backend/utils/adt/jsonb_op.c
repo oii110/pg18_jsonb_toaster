@@ -17,6 +17,7 @@
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
 
+
 Datum
 jsonb_exists(PG_FUNCTION_ARGS)
 {
@@ -113,17 +114,18 @@ jsonb_contains(PG_FUNCTION_ARGS)
 {
 	Jsonb	   *val = PG_GETARG_JSONB_P(0);
 	Jsonb	   *tmpl = PG_GETARG_JSONB_P(1);
+	bool		res;
 
-	JsonbIterator *it1,
-			   *it2;
+	jsonbInitIterators();
 
 	if (JB_ROOT_IS_OBJECT(val) != JB_ROOT_IS_OBJECT(tmpl))
-		PG_RETURN_BOOL(false);
+		res = false;
+	else
+		res = JsonbDeepContains(JsonRoot(val), JsonRoot(tmpl));
 
-	it1 = JsonbIteratorInit(&val->root);
-	it2 = JsonbIteratorInit(&tmpl->root);
+	jsonbFreeIterators();
 
-	PG_RETURN_BOOL(JsonbDeepContains(&it1, &it2));
+	PG_RETURN_BOOL(res);
 }
 
 Datum
@@ -133,16 +135,12 @@ jsonb_contained(PG_FUNCTION_ARGS)
 	Jsonb	   *tmpl = PG_GETARG_JSONB_P(0);
 	Jsonb	   *val = PG_GETARG_JSONB_P(1);
 
-	JsonbIterator *it1,
-			   *it2;
 
 	if (JB_ROOT_IS_OBJECT(val) != JB_ROOT_IS_OBJECT(tmpl))
 		PG_RETURN_BOOL(false);
 
-	it1 = JsonbIteratorInit(&val->root);
-	it2 = JsonbIteratorInit(&tmpl->root);
 
-	PG_RETURN_BOOL(JsonbDeepContains(&it1, &it2));
+	PG_RETURN_BOOL(JsonbDeepContains(JsonRoot(val), JsonRoot(tmpl)));
 }
 
 Datum
@@ -154,8 +152,8 @@ jsonb_ne(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) != 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -171,8 +169,8 @@ jsonb_lt(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) < 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -185,8 +183,8 @@ jsonb_gt(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) > 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -199,8 +197,8 @@ jsonb_le(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) <= 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -213,8 +211,8 @@ jsonb_ge(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) >= 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -227,8 +225,8 @@ jsonb_eq(PG_FUNCTION_ARGS)
 
 	res = (compareJsonbContainers(&jba->root, &jbb->root) == 0);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_BOOL(res);
 }
 
@@ -241,8 +239,8 @@ jsonb_cmp(PG_FUNCTION_ARGS)
 
 	res = compareJsonbContainers(&jba->root, &jbb->root);
 
-	PG_FREE_IF_COPY(jba, 0);
-	PG_FREE_IF_COPY(jbb, 1);
+	PG_FREE_IF_COPY_JSONB(jba, 0);
+	PG_FREE_IF_COPY_JSONB(jbb, 1);
 	PG_RETURN_INT32(res);
 }
 
@@ -287,7 +285,7 @@ jsonb_hash(PG_FUNCTION_ARGS)
 		}
 	}
 
-	PG_FREE_IF_COPY(jb, 0);
+	PG_FREE_IF_COPY_JSONB(jb, 0);
 	PG_RETURN_INT32(hash);
 }
 
@@ -330,6 +328,6 @@ jsonb_hash_extended(PG_FUNCTION_ARGS)
 		}
 	}
 
-	PG_FREE_IF_COPY(jb, 0);
+	PG_FREE_IF_COPY_JSONB(jb, 0);
 	PG_RETURN_UINT64(hash);
 }

@@ -115,6 +115,12 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
 	 * However, this field is ignored whenever attstorage does not allow
 	 * compression.
 	 */
+
+	/*
+	 * atttoaster keeps toaster for VARLENA attributes with EXTERNAL/EXTENDED
+	 * storage. Value should be set for any toastable data type.
+	 */
+	Oid			atttoaster;
 	char		attcompression BKI_DEFAULT('\0');
 
 	/*

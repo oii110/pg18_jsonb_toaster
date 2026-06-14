@@ -17,7 +17,7 @@
 #include <ctype.h>
 #include <limits.h>
 
-#include "access/detoast.h"
+#include "access/toasterapi.h"
 #include "access/toast_compression.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
@@ -42,6 +42,7 @@
 #include "utils/pg_locale.h"
 #include "utils/sortsupport.h"
 #include "utils/varlena.h"
+#include "access/toast_helper.h"
 
 
 /* GUC variable */
@@ -62,6 +63,8 @@ typedef struct
 	char	   *str2;			/* needle string */
 	int			len1;			/* string lengths in bytes */
 	int			len2;
+
+	DetoastIterator iter;
 
 	/* Skip table for Boyer-Moore-Horspool search algorithm: */
 	int			skiptablemask;	/* mask for ANDing with skiptable subscripts */
@@ -140,7 +143,7 @@ static text *text_substring(Datum str,
 							bool length_not_specified);
 static int	pg_mbcharcliplen_chars(const char *mbstr, int len, int limit);
 static text *text_overlay(text *t1, text *t2, int sp, int sl);
-static int	text_position(text *t1, text *t2, Oid collid);
+static int	text_position(text *t1, text *t2, Oid collid, DetoastIterator iter);
 static void text_position_setup(text *t1, text *t2, Oid collid, TextPositionState *state);
 static bool text_position_next(TextPositionState *state);
 static char *text_position_next_internal(char *start_ptr, TextPositionState *state);
@@ -1203,10 +1206,18 @@ text_overlay(text *t1, text *t2, int sp, int sl)
 Datum
 textpos(PG_FUNCTION_ARGS)
 {
-	text	   *str = PG_GETARG_TEXT_PP(0);
+	text		*str;
+	struct varlena *attr = (struct varlena *)
+								DatumGetPointer(PG_GETARG_DATUM(0));
 	text	   *search_str = PG_GETARG_TEXT_PP(1);
+	DetoastIterator iter = create_detoast_iterator(attr);
 
-	PG_RETURN_INT32((int32) text_position(str, search_str, PG_GET_COLLATION()));
+	if (iter != NULL)
+		str = (text *) iter->buf->buf;
+	else
+		str = PG_GETARG_TEXT_PP(0);
+
+	PG_RETURN_INT32((int32) text_position(str, search_str, PG_GET_COLLATION(), iter));
 }
 
 /*
@@ -1224,7 +1235,7 @@ textpos(PG_FUNCTION_ARGS)
  *	functions.
  */
 static int
-text_position(text *t1, text *t2, Oid collid)
+text_position(text *t1, text *t2, Oid collid, DetoastIterator iter)
 {
 	TextPositionState state;
 	int			result;
@@ -1241,6 +1252,7 @@ text_position(text *t1, text *t2, Oid collid)
 		return 0;
 
 	text_position_setup(t1, t2, collid, &state);
+	state.iter = iter;
 	/* don't need greedy mode here */
 	state.greedy = false;
 
@@ -1500,6 +1512,9 @@ text_position_next_internal(char *start_ptr, TextPositionState *state)
 		hptr = start_ptr;
 		while (hptr < haystack_end)
 		{
+			if (state->iter != NULL)
+				PG_DETOAST_ITERATE(state->iter, hptr);
+
 			const char *test_end;
 
 			/*
@@ -1544,6 +1559,9 @@ text_position_next_internal(char *start_ptr, TextPositionState *state)
 		hptr = start_ptr;
 		while (hptr < haystack_end)
 		{
+			if (state->iter != NULL)
+				PG_DETOAST_ITERATE(state->iter, hptr);
+
 			if (*hptr == nchar)
 				return (char *) hptr;
 			hptr++;
@@ -1557,6 +1575,9 @@ text_position_next_internal(char *start_ptr, TextPositionState *state)
 		hptr = start_ptr + needle_len - 1;
 		while (hptr < haystack_end)
 		{
+			if (state->iter != NULL)
+				PG_DETOAST_ITERATE(state->iter, hptr);
+
 			/* Match the needle scanning *backward* */
 			const char *nptr;
 			const char *p;
@@ -1629,7 +1650,7 @@ text_position_reset(TextPositionState *state)
 static void
 text_position_cleanup(TextPositionState *state)
 {
-	/* no cleanup needed */
+	free_detoast_iterator(state->iter);
 }
 
 

@@ -341,7 +341,6 @@ static void JsonValueListInitIterator(const JsonValueList *jvl,
 									  JsonValueListIterator *it);
 static JsonbValue *JsonValueListNext(const JsonValueList *jvl,
 									 JsonValueListIterator *it);
-static JsonbValue *JsonbInitBinary(JsonbValue *jbv, Jsonb *jb);
 static int	JsonbType(JsonbValue *jb);
 static JsonbValue *getScalar(JsonbValue *scalar, enum jbvType type);
 static JsonbValue *wrapItemsInArray(const JsonValueList *items);
@@ -412,7 +411,7 @@ jsonb_path_exists_internal(FunctionCallInfo fcinfo, bool tz)
 						  countVariablesFromJsonb,
 						  jb, !silent, NULL, tz);
 
-	PG_FREE_IF_COPY(jb, 0);
+	PG_FREE_IF_COPY_JSONB(jb, 0);
 	PG_FREE_IF_COPY(jp, 1);
 
 	if (jperIsError(res))
@@ -469,7 +468,7 @@ jsonb_path_match_internal(FunctionCallInfo fcinfo, bool tz)
 						   countVariablesFromJsonb,
 						   jb, !silent, &found, tz);
 
-	PG_FREE_IF_COPY(jb, 0);
+	PG_FREE_IF_COPY_JSONB(jb, 0);
 	PG_FREE_IF_COPY(jp, 1);
 
 	if (JsonValueListLength(&found) == 1)
@@ -539,6 +538,8 @@ jsonb_path_query_internal(FunctionCallInfo fcinfo, bool tz)
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		jsonbInitIterators();
+		
 
 		jb = PG_GETARG_JSONB_P_COPY(0);
 		jp = PG_GETARG_JSONPATH_P_COPY(1);
@@ -560,12 +561,15 @@ jsonb_path_query_internal(FunctionCallInfo fcinfo, bool tz)
 	c = list_head(found);
 
 	if (c == NULL)
+	{
+		jsonbFreeIterators();
 		SRF_RETURN_DONE(funcctx);
+	}
 
 	v = lfirst(c);
 	funcctx->user_fctx = list_delete_first(found);
 
-	SRF_RETURN_NEXT(funcctx, JsonbPGetDatum(JsonbValueToJsonb(v)));
+	SRF_RETURN_NEXT(funcctx, JsonValueToJsonbDatum(v));
 }
 
 Datum
@@ -598,7 +602,7 @@ jsonb_path_query_array_internal(FunctionCallInfo fcinfo, bool tz)
 						   countVariablesFromJsonb,
 						   jb, !silent, &found, tz);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(wrapItemsInArray(&found)));
+	PG_RETURN_JSONB_VALUE_P(wrapItemsInArray(&found));
 }
 
 Datum
@@ -632,7 +636,7 @@ jsonb_path_query_first_internal(FunctionCallInfo fcinfo, bool tz)
 						   jb, !silent, &found, tz);
 
 	if (JsonValueListLength(&found) >= 1)
-		PG_RETURN_JSONB_P(JsonbValueToJsonb(JsonValueListHead(&found)));
+		PG_RETURN_JSONB_VALUE_P(JsonValueListHead(&found));
 	else
 		PG_RETURN_NULL();
 }
@@ -687,7 +691,7 @@ executeJsonPath(JsonPath *path, void *vars, JsonPathGetVarCallback getVar,
 	jspInit(&jsp, path);
 
 	if (!JsonbExtractScalar(&json->root, &jbv))
-		JsonbInitBinary(&jbv, json);
+		JsonValueInitBinary(&jbv, JsonRoot(json));
 
 	cxt.vars = vars;
 	cxt.getVar = getVar;
@@ -2281,7 +2285,7 @@ executeLikeRegex(JsonPathItem *jsp, JsonbValue *str, JsonbValue *rarg,
 									&(cxt->cflags), NULL);
 	}
 
-	if (RE_compile_and_execute(cxt->regex, str->val.string.val,
+	if (RE_compile_and_execute(cxt->regex, unconstify(char *, str->val.string.val),
 							   str->val.string.len,
 							   cxt->cflags, DEFAULT_COLLATION_OID, 0, NULL))
 		return jpbTrue;
@@ -2860,7 +2864,8 @@ executeKeyValueMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 
 	/* construct object id from its base object and offset inside that */
 	id = jb->type != jbvBinary ? 0 :
-		(int64) ((char *) jbc - (char *) cxt->baseObject.jbc);
+	(int64) ((char *) JsonContainerDataPtr(jbc) -
+				 (char *) JsonContainerDataPtr(cxt->baseObject.jbc));	/* FIXME */
 	id += (int64) cxt->baseObject.id * INT64CONST(10000000000);
 
 	idval.type = jbvNumeric;
@@ -2903,7 +2908,7 @@ executeKeyValueMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 
 		jsonb = JsonbValueToJsonb(keyval);
 
-		JsonbInitBinary(&obj, jsonb);
+		JsonValueInitBinary(&obj, JsonRoot(jsonb));
 
 		baseObject = setBaseObject(cxt, &obj, cxt->lastGeneratedObjectId++);
 
@@ -3101,7 +3106,7 @@ JsonItemFromDatum(Datum val, Oid typid, int32 typmod, JsonbValue *res)
 					Assert(result);
 				}
 				else
-					JsonbInitBinary(jbv, jb);
+					JsonValueInitBinary(jbv, JsonRoot(jb));
 				break;
 			}
 		case JSONOID:
@@ -3189,7 +3194,7 @@ getJsonPathVariableFromJsonb(void *varsJsonb, char *varName, int varNameLength,
 	}
 
 	*baseObjectId = 1;
-	JsonbInitBinary(baseObject, vars);
+	JsonValueInitBinary(baseObject, JsonRoot(vars));
 
 	return result;
 }
@@ -3593,18 +3598,6 @@ JsonValueListNext(const JsonValueList *jvl, JsonValueListIterator *it)
 	return result;
 }
 
-/*
- * Initialize a binary JsonbValue with the given jsonb container.
- */
-static JsonbValue *
-JsonbInitBinary(JsonbValue *jbv, Jsonb *jb)
-{
-	jbv->type = jbvBinary;
-	jbv->val.binary.data = &jb->root;
-	jbv->val.binary.len = VARSIZE_ANY_EXHDR(jb);
-
-	return jbv;
-}
 
 /*
  * Returns jbv* type of JsonbValue. Note, it never returns jbvBinary as is.
@@ -3626,7 +3619,7 @@ JsonbType(JsonbValue *jb)
 		else if (JsonContainerIsArray(jbc))
 			type = jbvArray;
 		else
-			elog(ERROR, "invalid jsonb container type: 0x%08x", jbc->header);
+			elog(ERROR, "invalid jsonb container type");
 	}
 
 	return type;

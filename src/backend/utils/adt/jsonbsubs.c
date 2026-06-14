@@ -21,6 +21,7 @@
 #include "parser/parse_expr.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "utils/jsonfuncs.h"
 
 
 /* SubscriptingRefState.workspace for jsonb subscripting execution */
@@ -270,8 +271,8 @@ jsonb_subscript_assign(ExprState *state,
 	if (sbsrefstate->replacenull)
 		replacevalue.type = jbvNull;
 	else
-		JsonbToJsonbValue(DatumGetJsonbP(sbsrefstate->replacevalue),
-						  &replacevalue);
+		JsonToJsonValue(DatumGetJsonbP(sbsrefstate->replacevalue),
+						&replacevalue);
 
 	/*
 	 * In case if the input container is null, set up an empty jsonb and
