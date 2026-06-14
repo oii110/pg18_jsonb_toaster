@@ -55,3 +55,8 @@ lib*.pc
 /title.principals.tsv
 /title.ratings.tsv
 /toaster.diff
+/complete_diff.patch
+/good_test.sql
+/step_test.sql
+/test.sql
+/test2.sql
